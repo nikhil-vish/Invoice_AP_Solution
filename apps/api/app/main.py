@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
+from app.invoices.router import router as invoices_router
 
 app = FastAPI(
     title="Invoice Intelligence API",
@@ -16,6 +17,8 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
 )
 
+app.include_router(invoices_router)
+
 
 @app.get("/health", tags=["system"])
 def health():
@@ -26,6 +29,6 @@ def health():
 def api_info():
     return {
         "message": "Invoice Intelligence API",
-        "implemented": ["health"],
-        "next": ["clients", "suppliers", "invoice upload", "processing runs"],
+        "implemented": ["health", "POST /api/v1/invoices/upload"],
+        "next": ["clients", "suppliers", "processing runs"],
     }

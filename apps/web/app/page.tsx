@@ -28,6 +28,9 @@ export default function Home() {
         <div className="metricGrid">{metrics.map((m) => <article className="metric" key={m.label}><span>{m.label}</span><strong>{m.value}</strong><small>{m.note}</small></article>)}</div>
         <div className="sectionHead lower"><div><h3>Recent processing runs</h3><p>Every execution will be recorded with its stage history and outcome.</p></div></div>
         <div className="emptyState"><div className="emptyIcon">▤</div><strong>No processing runs yet</strong><p>Once the API, database and invoice intake are connected, your processing history will appear here.</p></div>
+        <div className="intakeAction" style={{marginTop:24}}>
+          <a href="/upload" className="btnGreen" style={{textDecoration:"none",display:"inline-block"}}>▤ Upload Invoice</a>
+        </div>
         <footer>INVOICE INTELLIGENCE WORKBENCH <span>STARTER · v0.1.0</span></footer>
       </section>
     </main>

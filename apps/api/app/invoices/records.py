@@ -34,14 +34,20 @@ def normalize_lines(payload: list | None) -> list[dict]:
 
 
 def extraction_summary(filename: str, size_bytes: int, extraction: dict, intake_status: str = "DRAFT") -> dict:
-    fields = normalize_fields(extraction["fields"])
+    # Handle both digital and scanned PDF extraction results
+    if extraction.get("kind") == "scanned":
+        fields = blank_fields()
+        line_items = []
+    else:
+        fields = normalize_fields(extraction.get("fields") or {})
+        line_items = extraction.get("line_items") or []
     return {
         "extractor": "pymupdf",
         "ocr_supported": False,
         "raw_text": extraction.get("raw_text") or "",
         "fields": fields,
         "field_status": field_status(fields),
-        "line_items": normalize_lines(extraction.get("line_items")),
+        "line_items": normalize_lines(line_items),
         "intake_status": intake_status,
         "filename": filename,
         "size_bytes": size_bytes,
