@@ -1,6 +1,5 @@
+
 -- Invoice Intelligence Workbench: intake drafts for pre-identification storage.
--- Apply in Supabase SQL Editor after 0001_initial_schema.sql.
--- RLS is enabled; policies should be added before exposing tenant data.
 
 create table public.invoice_intake_drafts (
   id uuid primary key default gen_random_uuid(),
@@ -12,13 +11,19 @@ create table public.invoice_intake_drafts (
   extracted_data jsonb not null default '{}'::jsonb,
   raw_text text,
   extraction_method text not null default 'pymupdf_digital',
-  processing_status text not null default 'EXTRACTED' check (processing_status in ('EXTRACTED','NEEDS_REVIEW','READY_FOR_VALIDATION','FAILED')),
+  processing_status text not null default 'EXTRACTED'
+    check (processing_status in (
+      'EXTRACTED',
+      'NEEDS_REVIEW',
+      'READY_FOR_VALIDATION',
+      'FAILED'
+    )),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (sha256)
 );
 
-create index invoice_intake_drafts_sha256_idx on public.invoice_intake_drafts(sha256);
-create index invoice_intake_drafts_status_idx on public.invoice_intake_drafts(processing_status);
+create index invoice_intake_drafts_status_idx
+  on public.invoice_intake_drafts(processing_status);
 
 alter table public.invoice_intake_drafts enable row level security;
