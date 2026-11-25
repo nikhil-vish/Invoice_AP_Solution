@@ -4,6 +4,7 @@ POST /api/v1/invoices/upload — multipart/form-data PDF upload.
 """
 
 import hashlib
+import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException, status, Path
 
 from app.invoices.extract import extract_invoice_pdf, PdfReadError
@@ -25,6 +26,17 @@ ALLOWED_CONTENT_TYPES = {"application/pdf"}
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _validate_uuid(value: str) -> None:
+    """Raise HTTPException 400 if value is not a valid UUID."""
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid draft ID format.",
+        )
 
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
@@ -157,6 +169,7 @@ async def upload_invoice(file: UploadFile = File(...)):
 @router.get("/drafts/{draft_id}")
 async def get_draft(draft_id: str = Path(...)):
     """Retrieve an intake draft by ID."""
+    _validate_uuid(draft_id)
     if not settings.supabase_url or not settings.supabase_service_role_key:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -198,6 +211,7 @@ async def get_draft(draft_id: str = Path(...)):
 @router.post("/drafts/{draft_id}/save")
 async def save_draft(draft_id: str = Path(...)):
     """Save edited draft data (placeholder for future persistence)."""
+    _validate_uuid(draft_id)
     if not settings.supabase_url or not settings.supabase_service_role_key:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

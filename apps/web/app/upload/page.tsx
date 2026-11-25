@@ -136,6 +136,10 @@ export default function UploadPage() {
 
       const data: UploadResponse = await res.json();
 
+      if (!data.draft_id) {
+        throw new Error("Upload succeeded but no draft ID returned.");
+      }
+
       setResponse(data);
       setState("success");
       setProgress(100);

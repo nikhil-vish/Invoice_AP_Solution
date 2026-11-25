@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useParams } from "next/navigation";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
@@ -54,7 +55,10 @@ const HEADER_LABELS: Record<string, string> = {
   currency: "Currency",
 };
 
-export default function ReviewPage({ params }: { params: { id: string } }) {
+export default function ReviewPage() {
+  const params = useParams<{ id: string }>();
+  const draftId = params?.id ?? "";
+
   const [data, setData] = useState<ReviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,9 +66,17 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const [saved, setSaved] = useState(false);
 
   const fetchData = useCallback(async () => {
+    if (!draftId) {
+      setError("Invalid draft ID.");
+      setLoading(false);
+      return;
+    }
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/drafts/${params.id}`);
+      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/drafts/${draftId}`);
       if (!res.ok) {
+        if (res.status === 404) {
+          throw new Error("Draft not found.");
+        }
         throw new Error("Could not load draft.");
       }
       const json = await res.json();
@@ -74,7 +86,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     } finally {
       setLoading(false);
     }
-  }, [params.id]);
+  }, [draftId]);
 
   useEffect(() => {
     fetchData();
@@ -105,14 +117,14 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   };
 
   const handleSaveDraft = async () => {
-    if (!data) return;
+    if (!data || !draftId) return;
     const payload = {
       draft_id: data.draft_id,
       fields: editedFields,
       line_items: data.line_items,
     };
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/drafts/${params.id}/save`, {
+      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/drafts/${draftId}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

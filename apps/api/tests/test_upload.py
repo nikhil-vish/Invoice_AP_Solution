@@ -257,3 +257,42 @@ def test_raw_text_preserved():
     body = response.json()
     assert "RAW-001" in body["raw_text"]
     assert "Test Co" in body["raw_text"]
+
+
+def test_upload_response_contains_draft_id():
+    pdf_bytes = _make_digital_pdf("INVOICE\nInvoice No: ID-001\n")
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/upload",
+            files={"file": ("id.pdf", pdf_bytes, "application/pdf")},
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert "draft_id" in body
+    assert isinstance(body["draft_id"], str)
+    assert len(body["draft_id"]) > 0
+
+
+def test_get_draft_invalid_uuid_format():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/drafts/not-a-uuid")
+    assert response.status_code == 400, response.text
+    assert "Invalid draft ID format" in response.json()["detail"]
+
+
+def test_get_draft_not_found():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/drafts/550e8400-e29b-41d4-a716-446655440000")
+    assert response.status_code == 404, response.text
+    assert "Draft not found" in response.json()["detail"]
+
+
+def test_save_draft_invalid_uuid_format():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.post("/api/v1/invoices/drafts/not-a-uuid/save")
+    assert response.status_code == 400, response.text
+    assert "Invalid draft ID format" in response.json()["detail"]
