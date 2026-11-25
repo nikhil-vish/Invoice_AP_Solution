@@ -559,3 +559,184 @@ def action_approval(
     }).execute()
     
     return data[0]
+
+
+# ==================== Draft-to-Invoice Conversion ====================
+
+def get_draft_by_id(client: Client, draft_id: str) -> dict | None:
+    """Return an intake draft by ID, or None if not found."""
+    result = client.table("invoice_intake_drafts").select("*").eq("id", draft_id).execute()
+    data = result.data or []
+    if not data:
+        return None
+    return data[0]
+
+
+def get_invoice_by_draft_id(client: Client, draft_id: str) -> dict | None:
+    """Return the invoice already converted from a draft, or None."""
+    result = client.table("invoice_intake_drafts").select("converted_invoice_id").eq("id", draft_id).execute()
+    data = result.data or []
+    if not data or not data[0].get("converted_invoice_id"):
+        return None
+    invoice_id = data[0]["converted_invoice_id"]
+    return get_invoice(client, invoice_id)
+
+
+def update_draft_conversion(
+    client: Client,
+    draft_id: str,
+    invoice_id: str | None,
+    status: str,
+) -> dict:
+    """Update the conversion tracking fields on an intake draft."""
+    result = (
+        client.table("invoice_intake_drafts")
+        .update({
+            "converted_invoice_id": invoice_id,
+            "conversion_status": status,
+            "converted_at": "now()" if status == "CONVERTED" else None,
+            "updated_at": "now()",
+        })
+        .eq("id", draft_id)
+        .execute()
+    )
+    if getattr(result, "error", None):
+        raise RepositoryError(f"Draft conversion update failed: {result.error}")
+    data = result.data or []
+    if not data:
+        raise RepositoryError("Draft conversion update returned no data")
+    return data[0]
+
+
+def convert_draft_to_invoice(
+    client: Client,
+    draft_id: str,
+    client_id: str,
+    client_entity_id: str,
+) -> dict:
+    """Convert an intake draft into a business invoice record.
+
+    Returns a dict with keys:
+      - invoice_id: the invoice UUID
+      - invoice_number: invoice number (or None)
+      - status: "converted" or "already_converted"
+    """
+    draft = get_draft_by_id(client, draft_id)
+    if not draft:
+        raise RepositoryError("Draft not found")
+
+    # Idempotency: if already converted, return the existing invoice
+    existing_invoice = get_invoice_by_draft_id(client, draft_id)
+    if existing_invoice:
+        return {
+            "invoice_id": existing_invoice["id"],
+            "invoice_number": existing_invoice.get("invoice_number"),
+            "status": "already_converted",
+        }
+
+    # Validate draft has extraction data
+    extracted_data = draft.get("extracted_data") or {}
+    fields = extracted_data.get("fields") or {}
+    line_items = extracted_data.get("line_items") or []
+
+    # Determine procurement type from PO number presence
+    po_number = fields.get("po_number")
+    procurement_type = "PO" if po_number else "NON_PO"
+
+    # Insert invoice record
+    invoice_payload = {
+        "client_id": client_id,
+        "client_entity_id": client_entity_id,
+        "invoice_number": fields.get("invoice_number"),
+        "invoice_date": fields.get("invoice_date"),
+        "currency": fields.get("currency") or "INR",
+        "procurement_type": procurement_type,
+        "purchase_order_id": None,  # PO matching is Phase 2
+        "contract_id": None,
+        "taxable_value": fields.get("taxable_value"),
+        "cgst_amount": fields.get("cgst"),
+        "sgst_amount": fields.get("sgst"),
+        "igst_amount": fields.get("igst"),
+        "cess_amount": fields.get("cess"),
+        "other_charges": None,
+        "discount_amount": None,
+        "total_amount": fields.get("invoice_grand_total"),
+        "processing_status": "RECEIVED",
+        "approval_status": "PENDING",
+        "source_file_sha256": draft.get("sha256"),
+    }
+
+    invoice = insert_invoice(client, invoice_payload)
+    invoice_id = invoice["id"]
+
+    # Insert line items
+    if line_items:
+        item_payloads = []
+        for idx, item in enumerate(line_items, start=1):
+            item_payloads.append({
+                "invoice_id": invoice_id,
+                "line_number": idx,
+                "description": item.get("description"),
+                "item_code": None,
+                "hsn_sac": item.get("hsn_sac"),
+                "quantity": item.get("quantity"),
+                "unit_of_measure": None,
+                "unit_price": item.get("unit_price"),
+                "taxable_value": item.get("taxable_value"),
+                "gst_rate": None,
+                "cgst_amount": item.get("cgst"),
+                "sgst_amount": item.get("sgst"),
+                "igst_amount": item.get("igst"),
+                "total_amount": item.get("taxable_value"),
+            })
+        insert_invoice_items(client, invoice_id, item_payloads)
+
+    # Insert document reference
+    insert_invoice_document(client, {
+        "invoice_id": invoice_id,
+        "storage_path": draft.get("storage_path"),
+        "original_filename": draft.get("original_filename"),
+        "mime_type": draft.get("mime_type"),
+        "sha256": draft.get("sha256"),
+        "document_type": "invoice_pdf",
+        "extraction_method": draft.get("extraction_method") or "pymupdf_digital",
+    })
+
+    # Create initial processing run
+    run_payload = {
+        "invoice_id": invoice_id,
+        "run_number": 1,
+        "status": "QUEUED",
+        "triggered_by": "DRAFT_CONVERSION",
+        "idempotency_key": f"convert-{draft_id}",
+        "summary": {
+            "draft_id": draft_id,
+            "extraction_kind": extracted_data.get("kind"),
+            "line_item_count": len(line_items),
+        },
+    }
+    run = insert_processing_run(client, run_payload)
+
+    # Update draft with conversion tracking
+    update_draft_conversion(client, draft_id, invoice_id, "CONVERTED")
+
+    # Write audit log
+    client.table("audit_logs").insert({
+        "client_id": client_id,
+        "invoice_id": invoice_id,
+        "actor_type": "SYSTEM",
+        "actor_id": "draft-conversion",
+        "action": "DRAFT_CONVERTED_TO_INVOICE",
+        "before_state": {"draft_id": draft_id, "draft_status": draft.get("processing_status")},
+        "after_state": {
+            "invoice_id": invoice_id,
+            "invoice_number": invoice.get("invoice_number"),
+            "processing_run_id": run.get("id"),
+        },
+    }).execute()
+
+    return {
+        "invoice_id": invoice_id,
+        "invoice_number": invoice.get("invoice_number"),
+        "status": "converted",
+    }

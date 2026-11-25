@@ -41,7 +41,6 @@ from app.invoices.repository import (
     list_processing_runs,
     get_processing_run,
     insert_processing_run,
-    update_processing_run,
     insert_validation_result,
     list_suppliers,
     list_approvals,
@@ -51,6 +50,10 @@ from app.invoices.repository import (
     assign_exception,
     resolve_exception,
     action_approval,
+    get_draft_by_id,
+    get_invoice_by_draft_id,
+    convert_draft_to_invoice,
+    update_draft_conversion,
     RepositoryError,
 )
 from app.config import settings
@@ -389,6 +392,56 @@ router.include_router(approvals_router)
 router.include_router(exceptions_router)
 
 
+# ==================== Dashboard Metrics ====================
+
+@router.get("/dashboard/metrics")
+async def dashboard_metrics():
+    """Return dashboard metrics for the overview page."""
+    client = _get_client()
+    try:
+        # Total business invoices
+        inv_result = client.table("invoices").select("id", count="exact").execute()
+        total_invoices = inv_result.count or 0
+
+        # Invoices by processing status
+        status_result = client.table("invoices").select("processing_status", count="exact").execute()
+        statuses = status_result.data or []
+        invoices_received = sum(1 for s in statuses if s.get("processing_status") == "RECEIVED")
+        invoices_awaiting_review = sum(1 for s in statuses if s.get("processing_status") == "EXTRACTED")
+
+        # Queued processing runs
+        runs_result = client.table("processing_runs").select("id", count="exact").eq("status", "QUEUED").execute()
+        queued_runs = runs_result.count or 0
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch metrics: {exc}",
+        )
+
+    return {
+        "total_invoices": total_invoices,
+        "invoices_received": invoices_received,
+        "queued_processing_runs": queued_runs,
+        "invoices_awaiting_review": invoices_awaiting_review,
+    }
+
+
+@router.get("/config/status")
+async def config_status():
+    """Return safe integration status booleans for the Settings page.
+
+    Never exposes API keys, service-role credentials, or sensitive values.
+    """
+    return {
+        "supabase_configured": bool(settings.supabase_url and settings.supabase_service_role_key),
+        "storage_bucket_configured": bool(settings.supabase_storage_bucket),
+        "openrouter_configured": bool(settings.openrouter_api_key and settings.openrouter_model),
+        "ai_extraction_enabled": settings.ai_extraction_enabled,
+        "ai_reasoning_enabled": settings.ai_reasoning_enabled,
+    }
+
+
 # ==================== Main Invoice Routes ====================
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
@@ -680,3 +733,69 @@ async def save_draft(draft_id: str = Path(...)):
             detail=f"Save failed: {exc}",
         )
     return {"draft_id": draft_id, "status": "READY_FOR_VALIDATION", "saved": True}
+
+
+@router.post("/drafts/{draft_id}/convert")
+async def convert_draft(
+    draft_id: str = Path(...),
+):
+    """Convert a saved intake draft into a business invoice record.
+
+    Idempotent: calling more than once returns the same invoice.
+    Requires the draft to have been saved (status READY_FOR_VALIDATION).
+    """
+    _validate_uuid(draft_id)
+    client = _get_client()
+
+    try:
+        draft = get_draft_by_id(client, draft_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not draft:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Draft not found.",
+        )
+
+    # Require the draft to have been saved/reviewed before conversion
+    if draft.get("processing_status") != "READY_FOR_VALIDATION":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Draft has not been saved for review. Save the draft first.",
+        )
+
+    try:
+        result = convert_draft_to_invoice(
+            client,
+            draft_id=draft_id,
+            client_id=DEFAULT_CLIENT_ID,
+            client_entity_id=DEFAULT_CLIENT_ID,
+        )
+    except RepositoryError as exc:
+        # Mark draft as failed on conversion error
+        try:
+            update_draft_conversion(client, draft_id, None, "FAILED")
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Conversion failed: {exc}",
+        )
+
+    return {
+        "draft_id": draft_id,
+        "invoice_id": result["invoice_id"],
+        "invoice_number": result.get("invoice_number"),
+        "status": result["status"],
+        "message": "Draft converted to invoice successfully"
+        if result["status"] == "converted"
+        else "Draft was already converted to this invoice.",
+    }

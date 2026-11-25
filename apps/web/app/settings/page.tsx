@@ -1,8 +1,57 @@
 "use client";
 
 import { Shell } from "@/components/Shell";
+import { useState, useEffect, useCallback } from "react";
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
+interface ConfigStatus {
+  supabase_configured: boolean;
+  storage_bucket_configured: boolean;
+  openrouter_configured: boolean;
+  ai_extraction_enabled: boolean;
+  ai_reasoning_enabled: boolean;
+}
 
 export default function SettingsPage() {
+  const [config, setConfig] = useState<ConfigStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchConfig = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/config/status`);
+      if (!res.ok) throw new Error("Failed to fetch config status");
+      const data: ConfigStatus = await res.json();
+      setConfig(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load configuration status");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchConfig();
+  }, [fetchConfig]);
+
+  if (loading) {
+    return (
+      <Shell>
+        <header className="topbar">
+          <div>
+            <div className="eyebrow">ACCOUNTS PAYABLE / SETTINGS</div>
+            <h1>Settings</h1>
+          </div>
+        </header>
+        <div className="emptyState">
+          <div className="emptyIcon">↻</div>
+          <strong>Loading configuration…</strong>
+        </div>
+      </Shell>
+    );
+  }
+
   return (
     <Shell>
       <header className="topbar">
@@ -25,18 +74,24 @@ export default function SettingsPage() {
           <dl className="settingsList">
             <dt>Supabase</dt>
             <dd>
-              <span className="statusBadge statusConnected">Connected</span>
-              <small className="muted">Project: tczihlegkpahhqsxgenk</small>
+              <span className={config?.supabase_configured ? "statusBadge statusConnected" : "statusBadge statusNotConfigured"}>
+                {config?.supabase_configured ? "Connected" : "Not configured"}
+              </span>
+              <small className="muted">Project configured via SUPABASE_URL</small>
             </dd>
             <dt>Storage bucket</dt>
             <dd>
-              <span className="statusBadge statusConnected">invoices</span>
+              <span className={config?.storage_bucket_configured ? "statusBadge statusConnected" : "statusBadge statusNotConfigured"}>
+                {config?.storage_bucket_configured ? "invoices" : "Not configured"}
+              </span>
               <small className="muted">Private bucket</small>
             </dd>
             <dt>OpenRouter</dt>
             <dd>
-              <span className="statusBadge statusNotConfigured">Not configured</span>
-              <small className="muted">Set OPENROUTER_API_KEY in backend .env</small>
+              <span className={config?.openrouter_configured ? "statusBadge statusConnected" : "statusBadge statusNotConfigured"}>
+                {config?.openrouter_configured ? "Configured" : "Not configured"}
+              </span>
+              <small className="muted">Set OPENROUTER_API_KEY and OPENROUTER_MODEL in backend .env</small>
             </dd>
             <dt>n8n</dt>
             <dd>
@@ -53,8 +108,10 @@ export default function SettingsPage() {
             <dd>PyMuPDF (digital text only)</dd>
             <dt>AI extraction</dt>
             <dd>
-              <span className="statusBadge statusNotConfigured">Disabled</span>
-              <small className="muted">Set AI_EXTRACTION_ENABLED=true and OPENROUTER_API_KEY to enable</small>
+              <span className={config?.ai_extraction_enabled ? "statusBadge statusConnected" : "statusBadge statusNotConfigured"}>
+                {config?.ai_extraction_enabled ? "Enabled" : "Disabled"}
+              </span>
+              <small className="muted">Set AI_EXTRACTION_ENABLED=true to enable</small>
             </dd>
             <dt>OCR fallback</dt>
             <dd>
@@ -103,6 +160,14 @@ export default function SettingsPage() {
           </dl>
         </section>
       </div>
+
+      {error && (
+        <div className="errorCard">
+          <div className="errorIcon">!</div>
+          <strong>Failed to load configuration</strong>
+          <p>{error}</p>
+        </div>
+      )}
 
       <div className="sectionHead" style={{ marginTop: 32 }}>
         <div>

@@ -37,6 +37,13 @@ interface ReviewData {
   message: string | null;
 }
 
+interface ConversionState {
+  status: "idle" | "converting" | "success" | "error";
+  invoice_id: string | null;
+  invoice_number: string | null;
+  error: string | null;
+}
+
 const HEADER_LABELS: Record<string, string> = {
   supplier_legal_name: "Supplier legal name",
   supplier_gstin: "Supplier GSTIN",
@@ -65,6 +72,12 @@ export default function ReviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [editedFields, setEditedFields] = useState<Record<string, FieldValue>>({});
   const [saved, setSaved] = useState(false);
+  const [conversion, setConversion] = useState<ConversionState>({
+    status: "idle",
+    invoice_id: null,
+    invoice_number: null,
+    error: null,
+  });
 
   const fetchData = useCallback(async () => {
     if (!draftId) {
@@ -132,8 +145,44 @@ export default function ReviewPage() {
       });
       if (!res.ok) throw new Error("Save failed.");
       setSaved(true);
+      setConversion(prev => ({ ...prev, status: "idle", error: null }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed.");
+    }
+  };
+
+  const handleConvert = async () => {
+    if (!draftId) return;
+    setConversion({ status: "converting", invoice_id: null, invoice_number: null, error: null });
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/drafts/${draftId}/convert`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        let detail = "Conversion failed.";
+        try {
+          const errBody = await res.json();
+          detail = errBody.detail || detail;
+        } catch {
+          // Ignore response parsing errors
+        }
+        throw new Error(detail);
+      }
+      const json = await res.json();
+      setConversion({
+        status: "success",
+        invoice_id: json.invoice_id,
+        invoice_number: json.invoice_number || null,
+        error: null,
+      });
+    } catch (err) {
+      setConversion({
+        status: "error",
+        invoice_id: null,
+        invoice_number: null,
+        error: err instanceof Error ? err.message : "Conversion failed.",
+      });
     }
   };
 
@@ -308,6 +357,48 @@ export default function ReviewPage() {
         <button className="btnGreen" onClick={handleSaveDraft} disabled={saved}>
           {saved ? "Saved" : "Save draft"}
         </button>
+
+        {!saved && (
+          <button
+            className="btnOutline"
+            onClick={handleSaveDraft}
+            style={{ marginLeft: 8 }}
+          >
+            Save draft
+          </button>
+        )}
+
+        {saved && conversion.status !== "success" && (
+          <button
+            className="btnGreen"
+            onClick={handleConvert}
+            disabled={conversion.status === "converting"}
+          >
+            {conversion.status === "converting" ? "Converting…" : "Save & Process Invoice"}
+          </button>
+        )}
+
+        {conversion.status === "success" && conversion.invoice_id && (
+          <div className="successCard" style={{ marginLeft: 8, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", border: "1px solid var(--green)", borderRadius: 6, background: "rgba(23, 107, 80, 0.05)" }}>
+            <span className="successIcon">✓</span>
+            <span>Invoice {conversion.invoice_number || conversion.invoice_id?.slice(0, 8)}… created</span>
+            <a
+              href="/invoices"
+              className="btnOutline"
+              style={{ fontSize: 12, padding: "4px 10px" }}
+            >
+              View in All Invoices
+            </a>
+          </div>
+        )}
+
+        {conversion.status === "error" && (
+          <div className="errorCard" style={{ marginLeft: 8, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px" }}>
+            <div className="errorIcon">!</div>
+            <span>{conversion.error}</span>
+          </div>
+        )}
+
         <span className="muted">Extraction method: PyMuPDF (digital text only, no OCR)</span>
       </div>
     </Shell>
