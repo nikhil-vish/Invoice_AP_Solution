@@ -382,3 +382,180 @@ def get_exception(client: Client, exception_id: str) -> Optional[dict]:
     if not data:
         return None
     return data[0]
+
+
+# ==================== Exception Actions ====================
+
+def assign_exception(client: Client, exception_id: str, owner_team: str, actor_id: str) -> dict:
+    """Assign an exception to an owner team."""
+    result = client.table("exceptions").update({
+        "owner_team": owner_team,
+        "status": "IN_REVIEW",
+        "updated_at": "now()",
+    }).eq("id", exception_id).execute()
+    if getattr(result, "error", None):
+        raise RepositoryError(f"Assign failed: {result.error}")
+    data = result.data or []
+    if not data:
+        raise RepositoryError("Exception not found or assign returned no data")
+    
+    # Log to audit
+    client.table("audit_logs").insert({
+        "invoice_id": data[0].get("invoice_id"),
+        "actor_type": "USER",
+        "actor_id": actor_id,
+        "action": "EXCEPTION_ASSIGNED",
+        "after_state": {"owner_team": owner_team, "status": "IN_REVIEW"},
+    }).execute()
+    
+    return data[0]
+
+
+def resolve_exception(client: Client, exception_id: str, resolution_comment: str, actor_id: str) -> dict:
+    """Resolve an exception with a mandatory resolution comment."""
+    # First check current state
+    current = get_exception(client, exception_id)
+    if not current:
+        raise RepositoryError("Exception not found")
+    
+    if current.get("status") in ("RESOLVED", "CLOSED"):
+        raise RepositoryError("Exception already resolved. Use reopen workflow to modify.")
+    
+    result = client.table("exceptions").update({
+        "status": "RESOLVED",
+        "resolution": {"comment": resolution_comment, "resolved_by": actor_id},
+        "resolved_at": "now()",
+        "updated_at": "now()",
+    }).eq("id", exception_id).execute()
+    if getattr(result, "error", None):
+        raise RepositoryError(f"Resolve failed: {result.error}")
+    data = result.data or []
+    if not data:
+        raise RepositoryError("Exception not found or resolve returned no data")
+    
+    # Log to audit
+    client.table("audit_logs").insert({
+        "invoice_id": data[0].get("invoice_id"),
+        "actor_type": "USER",
+        "actor_id": actor_id,
+        "action": "EXCEPTION_RESOLVED",
+        "after_state": {"resolution": {"comment": resolution_comment, "resolved_by": actor_id}, "status": "RESOLVED"},
+    }).execute()
+    
+    return data[0]
+
+
+# ==================== Approval Actions ====================
+
+def get_invoice_validation_status(client: Client, invoice_id: str) -> dict:
+    """Get the latest validation status for an invoice."""
+    # Get the latest processing run
+    runs_result = client.table("processing_runs").select("*").eq("invoice_id", invoice_id).order("run_number", desc=True).limit(1).execute()
+    runs = runs_result.data or []
+    if not runs:
+        return {"ready_for_approval": False, "has_hard_stop_exceptions": False, "validation_passed": False}
+    
+    run = runs[0]
+    run_id = run["id"]
+    
+    # Check validation results
+    vr_result = client.table("validation_results").select("*").eq("processing_run_id", run_id).execute()
+    validations = vr_result.data or []
+    
+    # Check for hard-stop exceptions (CRITICAL severity, not resolved)
+    exc_result = client.table("exceptions").select("*").eq("invoice_id", invoice_id).in_("status", ["OPEN", "IN_REVIEW", "AWAITING_RESPONSE"]).execute()
+    exceptions = exc_result.data or []
+    hard_stop_exceptions = [e for e in exceptions if e.get("severity") == "CRITICAL"]
+    
+    validation_passed = all(v.get("status") in ("PASSED", "SKIPPED") for v in validations)
+    
+    return {
+        "ready_for_approval": validation_passed and len(hard_stop_exceptions) == 0,
+        "has_hard_stop_exceptions": len(hard_stop_exceptions) > 0,
+        "validation_passed": validation_passed,
+        "hard_stop_count": len(hard_stop_exceptions),
+    }
+
+
+def action_approval(
+    client: Client,
+    approval_id: str,
+    action: str,
+    comment: Optional[str],
+    actor_id: str,
+) -> dict:
+    """Process an approval action (APPROVE, REJECT, RETURN_FOR_INFORMATION)."""
+    valid_actions = ["APPROVE", "REJECT", "RETURN_FOR_INFORMATION"]
+    if action not in valid_actions:
+        raise RepositoryError(f"Invalid action. Must be one of: {valid_actions}")
+    
+    if action in ("REJECT", "RETURN_FOR_INFORMATION") and not comment:
+        raise RepositoryError(f"Comment is required for {action} action")
+    
+    # Get approval
+    approval = get_approval(client, approval_id)
+    if not approval:
+        raise RepositoryError("Approval not found")
+    
+    if approval.get("status") != "PENDING":
+        raise RepositoryError(f"Approval already processed (status: {approval['status']})")
+    
+    invoice_id = approval["invoice_id"]
+    
+    # For APPROVE action, check validation status and hard-stop exceptions
+    if action == "APPROVE":
+        validation_status = get_invoice_validation_status(client, invoice_id)
+        if not validation_status["ready_for_approval"]:
+            if validation_status["has_hard_stop_exceptions"]:
+                raise RepositoryError(f"Cannot approve: {validation_status['hard_stop_count']} unresolved CRITICAL exception(s) exist")
+            raise RepositoryError("Cannot approve: validation not passed")
+    
+    # Map action to approval status
+    status_map = {
+        "APPROVE": "APPROVED",
+        "REJECT": "REJECTED",
+        "RETURN_FOR_INFORMATION": "REASSIGNED",  # Using REASSIGNED as "returned for info"
+    }
+    new_status = status_map[action]
+    
+    # Update approval
+    update_data = {
+        "status": new_status,
+        "decision_comment": comment,
+        "decided_at": "now()",
+    }
+    result = client.table("approvals").update(update_data).eq("id", approval_id).execute()
+    if getattr(result, "error", None):
+        raise RepositoryError(f"Approval action failed: {result.error}")
+    data = result.data or []
+    if not data:
+        raise RepositoryError("Approval not found or update returned no data")
+    
+    # Update invoice approval status
+    invoice_approval_status_map = {
+        "APPROVE": "APPROVED",
+        "REJECT": "REJECTED",
+        "RETURN_FOR_INFORMATION": "PENDING",  # Stays pending when returned for info
+    }
+    client.table("invoices").update({
+        "approval_status": invoice_approval_status_map[action],
+        "updated_at": "now()",
+    }).eq("id", invoice_id).execute()
+    
+    # Also update processing status if approved
+    if action == "APPROVE":
+        client.table("invoices").update({
+            "processing_status": "APPROVED",
+            "updated_at": "now()",
+        }).eq("id", invoice_id).execute()
+    
+    # Log to audit
+    client.table("audit_logs").insert({
+        "invoice_id": invoice_id,
+        "actor_type": "USER",
+        "actor_id": actor_id,
+        "action": f"APPROVAL_{action}",
+        "after_state": {"approval_status": new_status, "comment": comment},
+    }).execute()
+    
+    return data[0]

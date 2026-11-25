@@ -1,7 +1,9 @@
 """Invoice PDF extraction pipeline: PyMuPDF -> AI (optional) -> structured output."""
 
-import re
+import asyncio
+import concurrent.futures
 import logging
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Dict, Any, List
@@ -12,8 +14,27 @@ from app.config import settings
 from app.invoices.fields import HEADER_FIELDS, LINE_FIELDS
 from app.invoices.models import InvoiceExtraction, ExtractionResult, ExtractionField, LineItem
 from app.invoices.ai_extract import extract_with_ai, AIExtractionError
-
 logger = logging.getLogger(__name__)
+
+
+def _run_ai_extraction(raw_text: str) -> Optional[ExtractionResult]:
+    """Run the async AI extraction coroutine safely in sync or async contexts.
+
+    If an event loop is already running (e.g., inside a FastAPI request),
+    ``asyncio.run()`` cannot be used directly. In that case, the coroutine is
+    executed in a separate worker thread with its own event loop.
+    """
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is not None and running_loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, extract_with_ai(raw_text))
+            return future.result()
+    return asyncio.run(extract_with_ai(raw_text))
+
 
 GSTIN_RE = re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b")
 SKIP_LINE = re.compile(
@@ -88,11 +109,7 @@ def extract_invoice_pdf(data: bytes) -> Dict[str, Any]:
     ai_result = None
     if settings.ai_extraction_enabled:
         try:
-            import asyncio
-            ai_result = asyncio.run(extract_with_ai(raw_text))
-        except RuntimeError:
-            # Event loop already running (e.g., in tests), skip AI
-            logger.warning("Could not run AI extraction: event loop conflict")
+            ai_result = _run_ai_extraction(raw_text)
         except Exception as e:
             logger.warning(f"AI extraction failed: {e}")
 

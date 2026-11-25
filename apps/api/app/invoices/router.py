@@ -10,8 +10,11 @@ Endpoints:
 - GET /api/v1/invoices/suppliers — list suppliers
 - GET /api/v1/invoices/approvals — list approval tasks
 - GET /api/v1/invoices/approvals/{approval_id} — approval detail
+- POST /api/v1/invoices/approvals/{approval_id}/action — process approval action
 - GET /api/v1/invoices/exceptions — list exceptions
 - GET /api/v1/invoices/exceptions/{exception_id} — exception detail
+- POST /api/v1/invoices/exceptions/{exception_id}/assign — assign exception
+- POST /api/v1/invoices/exceptions/{exception_id}/resolve — resolve exception
 - GET /api/v1/invoices/drafts/{draft_id} — retrieve intake draft
 - POST /api/v1/invoices/drafts/{draft_id}/save — save edited draft
 """
@@ -20,6 +23,7 @@ import hashlib
 import uuid
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, status, Path, Query
+from pydantic import BaseModel
 
 from app.invoices.extract import extract_invoice_pdf, PdfReadError
 from app.invoices.fields import MAX_UPLOAD_BYTES
@@ -44,6 +48,9 @@ from app.invoices.repository import (
     get_approval,
     list_exceptions,
     get_exception,
+    assign_exception,
+    resolve_exception,
+    action_approval,
     RepositoryError,
 )
 from app.config import settings
@@ -55,6 +62,23 @@ ALLOWED_CONTENT_TYPES = {"application/pdf"}
 
 # Development default client ID (replace with auth context in production)
 DEFAULT_CLIENT_ID = "00000000-0000-0000-0000-000000000001"
+
+
+# Pydantic models for request bodies
+class ExceptionAssignRequest(BaseModel):
+    owner_team: str
+    actor_id: str = "current-user"  # In production, get from auth context
+
+
+class ExceptionResolveRequest(BaseModel):
+    resolution_comment: str
+    actor_id: str = "current-user"
+
+
+class ApprovalActionRequest(BaseModel):
+    action: str  # APPROVE, REJECT, RETURN_FOR_INFORMATION
+    comment: Optional[str] = None
+    actor_id: str = "current-user"
 
 
 def _sha256(data: bytes) -> str:
@@ -208,6 +232,40 @@ async def get_approval_endpoint(approval_id: str = Path(...)):
     return approval
 
 
+@approvals_router.post("/{approval_id}/action")
+async def approval_action_endpoint(
+    approval_id: str = Path(...),
+    request: ApprovalActionRequest = None,
+):
+    """Process an approval action (APPROVE, REJECT, RETURN_FOR_INFORMATION)."""
+    _validate_uuid(approval_id)
+    client = _get_client()
+    try:
+        result = action_approval(
+            client,
+            approval_id=approval_id,
+            action=request.action.upper(),
+            comment=request.comment,
+            actor_id=request.actor_id,
+        )
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Approval not found.",
+        )
+    return result
+
+
 # Exceptions sub-router
 exceptions_router = APIRouter(prefix="/exceptions", tags=["exceptions"])
 
@@ -256,6 +314,72 @@ async def get_exception_endpoint(exception_id: str = Path(...)):
             detail="Exception not found.",
         )
     return exception
+
+
+@exceptions_router.post("/{exception_id}/assign")
+async def assign_exception_endpoint(
+    exception_id: str = Path(...),
+    request: ExceptionAssignRequest = None,
+):
+    """Assign an exception to an owner team."""
+    _validate_uuid(exception_id)
+    client = _get_client()
+    try:
+        result = assign_exception(
+            client,
+            exception_id=exception_id,
+            owner_team=request.owner_team,
+            actor_id=request.actor_id,
+        )
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Exception not found.",
+        )
+    return result
+
+
+@exceptions_router.post("/{exception_id}/resolve")
+async def resolve_exception_endpoint(
+    exception_id: str = Path(...),
+    request: ExceptionResolveRequest = None,
+):
+    """Resolve an exception with a mandatory resolution comment."""
+    _validate_uuid(exception_id)
+    client = _get_client()
+    try:
+        result = resolve_exception(
+            client,
+            exception_id=exception_id,
+            resolution_comment=request.resolution_comment,
+            actor_id=request.actor_id,
+        )
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Exception not found.",
+        )
+    return result
 
 
 # Include sub-routers FIRST so their routes have priority over catch-all routes

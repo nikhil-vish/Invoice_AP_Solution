@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     ai_extraction_enabled: bool = False
     ai_extraction_timeout_seconds: int = 45
     ai_extraction_max_retries: int = 1
+    ai_reasoning_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

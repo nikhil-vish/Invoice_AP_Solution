@@ -436,3 +436,566 @@ def test_process_invoice_not_found():
     with _settings_patch(mock_client):
         response = client.post("/api/v1/invoices/550e8400-e29b-41d4-a716-446655440000/process")
     assert response.status_code == 404, response.text
+
+
+# ==================== Approvals Tests ====================
+
+def test_list_approvals():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[{
+            "id": "app-1",
+            "invoice_id": "inv-1",
+            "approval_level": 1,
+            "status": "PENDING",
+            "assigned_at": "2024-01-15T10:00:00Z",
+            "invoices": {"invoice_number": "INV-001", "supplier_name": "Test Supplier", "total_amount": 10000, "currency": "INR"}
+        }],
+        count=1
+    )
+    mock_table.select.return_value = chain_mock
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/approvals")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "approvals" in body
+    assert "total" in body
+    assert body["total"] == 1
+
+
+def test_list_approvals_with_status_filter():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[],
+        count=0
+    )
+    mock_table.select.return_value = chain_mock
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/approvals?status=APPROVED&page=2&page_size=10")
+    assert response.status_code == 200, response.text
+
+
+def test_get_approval_not_found():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_table.select.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=[],
+        count=0
+    )
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000")
+    assert response.status_code == 404, response.text
+
+
+def test_get_approval_invalid_uuid():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/approvals/not-a-uuid")
+    assert response.status_code == 400, response.text
+
+
+# ==================== Exceptions Tests ====================
+
+def test_list_exceptions():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[{
+            "id": "exc-1",
+            "invoice_id": "inv-1",
+            "exception_code": "GST_MISMATCH",
+            "severity": "HIGH",
+            "status": "OPEN",
+            "description": "GST mismatch",
+            "created_at": "2024-01-15T10:00:00Z",
+            "invoices": {"invoice_number": "INV-001", "supplier_name": "Test Supplier"}
+        }],
+        count=1
+    )
+    mock_table.select.return_value = chain_mock
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/exceptions")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "exceptions" in body
+    assert "total" in body
+    assert body["total"] == 1
+
+
+def test_list_exceptions_with_filters():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[],
+        count=0
+    )
+    mock_table.select.return_value = chain_mock
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/exceptions?severity=CRITICAL&status=OPEN&page=2&page_size=10")
+    assert response.status_code == 200, response.text
+
+
+def test_get_exception_not_found():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_table.select.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=[],
+        count=0
+    )
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/exceptions/550e8400-e29b-41d4-a716-446655440000")
+    assert response.status_code == 404, response.text
+
+
+def test_get_exception_invalid_uuid():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/exceptions/not-a-uuid")
+    assert response.status_code == 400, response.text
+
+
+# ==================== Exception Actions Tests ====================
+
+def test_assign_exception():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    # Mock the update chain for assign_exception
+    mock_eq = MagicMock()
+    mock_eq.execute.return_value = MagicMock(
+        data=[{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "invoice_id": "550e8400-e29b-41d4-a716-446655440001",
+            "owner_team": "tax-team",
+            "status": "IN_REVIEW",
+        }],
+        error=None
+    )
+    mock_update = MagicMock()
+    mock_update.eq.return_value = mock_eq
+    mock_table.update.return_value = mock_update
+    # Mock audit log insert
+    mock_table.insert.return_value.execute.return_value = MagicMock(data=[], error=None)
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/exceptions/550e8400-e29b-41d4-a716-446655440000/assign",
+            json={"owner_team": "tax-team", "actor_id": "user-001"}
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "IN_REVIEW"
+    assert body["owner_team"] == "tax-team"
+
+
+def test_assign_exception_invalid_uuid():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/exceptions/not-a-uuid/assign",
+            json={"owner_team": "tax-team"}
+        )
+    assert response.status_code == 400, response.text
+
+
+def test_resolve_exception():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    # First select to check current state
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "invoice_id": "550e8400-e29b-41d4-a716-446655440001",
+            "status": "OPEN",
+        }],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    
+    # Mock the update chain for resolve_exception
+    mock_eq = MagicMock()
+    mock_eq.execute.return_value = MagicMock(
+        data=[{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "invoice_id": "550e8400-e29b-41d4-a716-446655440001",
+            "status": "RESOLVED",
+            "resolution": {"comment": "Fixed GSTIN", "resolved_by": "user-001"},
+        }],
+        error=None
+    )
+    mock_update = MagicMock()
+    mock_update.eq.return_value = mock_eq
+    mock_table.update.return_value = mock_update
+    # Mock audit log insert
+    mock_table.insert.return_value.execute.return_value = MagicMock(data=[], error=None)
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/exceptions/550e8400-e29b-41d4-a716-446655440000/resolve",
+            json={"resolution_comment": "Fixed GSTIN", "actor_id": "user-001"}
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "RESOLVED"
+    assert body["resolution"]["comment"] == "Fixed GSTIN"
+
+
+def test_resolve_exception_already_resolved():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    # First select returns already resolved
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "invoice_id": "550e8400-e29b-41d4-a716-446655440001",
+            "status": "RESOLVED",
+        }],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/exceptions/550e8400-e29b-41d4-a716-446655440000/resolve",
+            json={"resolution_comment": "Fixed", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text
+    assert "already resolved" in response.json()["detail"].lower()
+
+
+def test_resolve_exception_not_found():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/exceptions/550e8400-e29b-41d4-a716-446655440000/resolve",
+            json={"resolution_comment": "Fixed", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_resolve_exception_invalid_uuid():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/exceptions/not-a-uuid/resolve",
+            json={"resolution_comment": "Fixed", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text
+
+
+# ==================== Approval Actions Tests ====================
+
+def test_approval_action_approve():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    # Mock get_approval
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "invoice_id": "550e8400-e29b-41d4-a716-446655440001",
+            "status": "PENDING",
+        }],
+        error=None
+    )
+    # Mock validation_results for invoice validation check
+    mock_table.select.return_value = mock_select
+    # Mock update for approval action
+    mock_eq = MagicMock()
+    mock_eq.execute.return_value = MagicMock(
+        data=[{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "invoice_id": "550e8400-e29b-41d4-a716-446655440001",
+            "status": "APPROVED",
+            "decision_comment": "Approved",
+        }],
+        error=None
+    )
+    mock_update = MagicMock()
+    mock_update.eq.return_value = mock_eq
+    mock_table.update.return_value = mock_update
+    # Mock audit log insert
+    mock_table.insert.return_value.execute.return_value = MagicMock(data=[], error=None)
+    
+    # Mock validation results query (for get_invoice_validation_status)
+    def mock_table_side_effect(table_name):
+        if table_name == "validation_results":
+            mock_vr_table = MagicMock()
+            mock_vr_select = MagicMock()
+            mock_vr_select.eq.return_value.execute.return_value = MagicMock(
+                data=[{"status": "PASSED"}],
+                error=None
+            )
+            mock_vr_table.select.return_value = mock_vr_select
+            return mock_vr_table
+        elif table_name == "exceptions":
+            mock_exc_table = MagicMock()
+            mock_exc_select = MagicMock()
+            mock_exc_select.eq.return_value.in_.return_value.execute.return_value = MagicMock(
+                data=[],
+                error=None
+            )
+            mock_exc_table.select.return_value = mock_exc_select
+            return mock_exc_table
+        elif table_name == "processing_runs":
+            mock_run_table = MagicMock()
+            mock_run_select = MagicMock()
+            mock_run_select.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+                data=[{"id": "550e8400-e29b-41d4-a716-446655440002"}],
+                error=None
+            )
+            mock_run_table.select.return_value = mock_run_select
+            return mock_run_table
+        return mock_table
+    
+    mock_client.table.side_effect = mock_table_side_effect
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000/action",
+            json={"action": "APPROVE", "comment": "Approved", "actor_id": "user-001"}
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "APPROVED"
+
+
+def test_approval_action_reject():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{"id": "550e8400-e29b-41d4-a716-446655440000", "invoice_id": "550e8400-e29b-41d4-a716-446655440001", "status": "PENDING"}],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    mock_eq = MagicMock()
+    mock_eq.execute.return_value = MagicMock(
+        data=[{"id": "550e8400-e29b-41d4-a716-446655440000", "invoice_id": "550e8400-e29b-41d4-a716-446655440001", "status": "REJECTED", "decision_comment": "Rejected - amount mismatch"}],
+        error=None
+    )
+    mock_update = MagicMock()
+    mock_update.eq.return_value = mock_eq
+    mock_table.update.return_value = mock_update
+    mock_table.insert.return_value.execute.return_value = MagicMock(data=[], error=None)
+    
+    def mock_table_side_effect(table_name):
+        if table_name == "validation_results":
+            mock_vr_table = MagicMock()
+            mock_vr_select = MagicMock()
+            mock_vr_select.eq.return_value.execute.return_value = MagicMock(data=[{"status": "PASSED"}], error=None)
+            mock_vr_table.select.return_value = mock_vr_select
+            return mock_vr_table
+        elif table_name == "exceptions":
+            mock_exc_table = MagicMock()
+            mock_exc_select = MagicMock()
+            mock_exc_select.eq.return_value.in_.return_value.execute.return_value = MagicMock(data=[], error=None)
+            mock_exc_table.select.return_value = mock_exc_select
+            return mock_exc_table
+        elif table_name == "processing_runs":
+            mock_run_table = MagicMock()
+            mock_run_select = MagicMock()
+            mock_run_select.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[{"id": "550e8400-e29b-41d4-a716-446655440002"}], error=None)
+            mock_run_table.select.return_value = mock_run_select
+            return mock_run_table
+        return mock_table
+    
+    mock_client.table.side_effect = mock_table_side_effect
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000/action",
+            json={"action": "REJECT", "comment": "Amount mismatch", "actor_id": "user-001"}
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "REJECTED"
+
+
+def test_approval_action_reject_no_comment():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{"id": "550e8400-e29b-41d4-a716-446655440000", "invoice_id": "550e8400-e29b-41d4-a716-446655440001", "status": "PENDING"}],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    
+    def mock_table_side_effect(table_name):
+        if table_name == "validation_results":
+            mock_vr_table = MagicMock()
+            mock_vr_select = MagicMock()
+            mock_vr_select.eq.return_value.execute.return_value = MagicMock(data=[{"status": "PASSED"}], error=None)
+            mock_vr_table.select.return_value = mock_vr_select
+            return mock_vr_table
+        elif table_name == "exceptions":
+            mock_exc_table = MagicMock()
+            mock_exc_select = MagicMock()
+            mock_exc_select.eq.return_value.in_.return_value.execute.return_value = MagicMock(data=[], error=None)
+            mock_exc_table.select.return_value = mock_exc_select
+            return mock_exc_table
+        elif table_name == "processing_runs":
+            mock_run_table = MagicMock()
+            mock_run_select = MagicMock()
+            mock_run_select.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[{"id": "550e8400-e29b-41d4-a716-446655440002"}], error=None)
+            mock_run_table.select.return_value = mock_run_select
+            return mock_run_table
+        return mock_table
+    
+    mock_client.table.side_effect = mock_table_side_effect
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000/action",
+            json={"action": "REJECT", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text
+    assert "comment is required" in response.json()["detail"].lower()
+
+
+def test_approval_action_return_for_information():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{"id": "550e8400-e29b-41d4-a716-446655440000", "invoice_id": "550e8400-e29b-41d4-a716-446655440001", "status": "PENDING"}],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    mock_eq = MagicMock()
+    mock_eq.execute.return_value = MagicMock(
+        data=[{"id": "550e8400-e29b-41d4-a716-446655440000", "invoice_id": "550e8400-e29b-41d4-a716-446655440001", "status": "REASSIGNED", "decision_comment": "Need more info"}],
+        error=None
+    )
+    mock_update = MagicMock()
+    mock_update.eq.return_value = mock_eq
+    mock_table.update.return_value = mock_update
+    mock_table.insert.return_value.execute.return_value = MagicMock(data=[], error=None)
+    
+    def mock_table_side_effect(table_name):
+        if table_name == "validation_results":
+            mock_vr_table = MagicMock()
+            mock_vr_select = MagicMock()
+            mock_vr_select.eq.return_value.execute.return_value = MagicMock(data=[{"status": "PASSED"}], error=None)
+            mock_vr_table.select.return_value = mock_vr_select
+            return mock_vr_table
+        elif table_name == "exceptions":
+            mock_exc_table = MagicMock()
+            mock_exc_select = MagicMock()
+            mock_exc_select.eq.return_value.in_.return_value.execute.return_value = MagicMock(data=[], error=None)
+            mock_exc_table.select.return_value = mock_exc_select
+            return mock_exc_table
+        elif table_name == "processing_runs":
+            mock_run_table = MagicMock()
+            mock_run_select = MagicMock()
+            mock_run_select.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[{"id": "550e8400-e29b-41d4-a716-446655440002"}], error=None)
+            mock_run_table.select.return_value = mock_run_select
+            return mock_run_table
+        return mock_table
+    
+    mock_client.table.side_effect = mock_table_side_effect
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000/action",
+            json={"action": "RETURN_FOR_INFORMATION", "comment": "Need more info", "actor_id": "user-001"}
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "REASSIGNED"
+
+
+def test_approval_action_already_processed():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{"id": "550e8400-e29b-41d4-a716-446655440000", "invoice_id": "550e8400-e29b-41d4-a716-446655440001", "status": "APPROVED"}],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000/action",
+            json={"action": "APPROVE", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text
+    assert "already processed" in response.json()["detail"].lower()
+
+
+def test_approval_action_invalid_action():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[{"id": "550e8400-e29b-41d4-a716-446655440000", "invoice_id": "550e8400-e29b-41d4-a716-446655440001", "status": "PENDING"}],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000/action",
+            json={"action": "INVALID_ACTION", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text
+    assert "invalid action" in response.json()["detail"].lower()
+
+
+def test_approval_action_not_found():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_select = MagicMock()
+    mock_select.eq.return_value.execute.return_value = MagicMock(
+        data=[],
+        error=None
+    )
+    mock_table.select.return_value = mock_select
+    
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/550e8400-e29b-41d4-a716-446655440000/action",
+            json={"action": "APPROVE", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_approval_action_invalid_uuid():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/approvals/not-a-uuid/action",
+            json={"action": "APPROVE", "actor_id": "user-001"}
+        )
+    assert response.status_code == 400, response.text

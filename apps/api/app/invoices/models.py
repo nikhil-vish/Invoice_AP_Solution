@@ -110,3 +110,4 @@ class ExtractionResult(BaseModel):
     field_status: dict = Field(default_factory=dict)
     line_items: List[dict] = Field(default_factory=list)
     message: Optional[str] = None
+    reasoning_details: Optional[dict] = None
