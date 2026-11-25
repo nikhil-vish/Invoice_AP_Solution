@@ -21,8 +21,9 @@ Endpoints:
 
 import hashlib
 import uuid
-from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Path, Query
+from decimal import Decimal, InvalidOperation
+from typing import Any, Optional
+from fastapi import APIRouter, BackgroundTasks, UploadFile, File, HTTPException, status, Path, Query, Header
 from pydantic import BaseModel
 
 from app.invoices.extract import extract_invoice_pdf, PdfReadError
@@ -41,6 +42,7 @@ from app.invoices.repository import (
     list_processing_runs,
     get_processing_run,
     insert_processing_run,
+    update_processing_run,
     insert_validation_result,
     list_suppliers,
     list_approvals,
@@ -54,18 +56,27 @@ from app.invoices.repository import (
     get_invoice_by_draft_id,
     convert_draft_to_invoice,
     update_draft_conversion,
+    create_invoice_for_draft,
+    get_draft_by_invoice_id,
+    resolve_demo_workspace,
+    update_draft_and_invoice,
+    duplicate_invoice_exists,
+    next_analysis_attempt,
+    insert_invoice_analysis,
+    latest_invoice_analysis,
+    invoice_analysis_history,
+    ai_dashboard_metrics,
     RepositoryError,
 )
 from app.config import settings
 from supabase import create_client
+from app.invoices.ai_analysis import analyse_invoice
+from app.invoices.ai_extract import AIExtractionError
+from app.invoices.validation import validate_invoice
 
 router = APIRouter(prefix="/api/v1/invoices", tags=["invoices"])
 
 ALLOWED_CONTENT_TYPES = {"application/pdf"}
-
-# Development default client ID (replace with auth context in production)
-DEFAULT_CLIENT_ID = "00000000-0000-0000-0000-000000000001"
-
 
 # Pydantic models for request bodies
 class ExceptionAssignRequest(BaseModel):
@@ -81,7 +92,27 @@ class ExceptionResolveRequest(BaseModel):
 class ApprovalActionRequest(BaseModel):
     action: str  # APPROVE, REJECT, RETURN_FOR_INFORMATION
     comment: Optional[str] = None
-    actor_id: str = "current-user"
+
+
+class ReviewFieldValue(BaseModel):
+    value: Any = None
+    status: str = "edited"
+
+
+class ReviewLineItem(BaseModel):
+    description: Optional[str] = None
+    hsn_sac: Optional[str] = None
+    quantity: Optional[Decimal] = None
+    unit_price: Optional[Decimal] = None
+    taxable_value: Optional[Decimal] = None
+    cgst: Optional[Decimal] = None
+    sgst: Optional[Decimal] = None
+    igst: Optional[Decimal] = None
+
+
+class DraftSaveRequest(BaseModel):
+    fields: dict[str, ReviewFieldValue]
+    line_items: list[ReviewLineItem]
 
 
 def _sha256(data: bytes) -> str:
@@ -109,6 +140,56 @@ def _get_client():
     return create_client(settings.supabase_url, settings.supabase_service_role_key)
 
 
+def _demo_client_id(client) -> str:
+    return resolve_demo_workspace(client)[0]
+
+
+def _verified_reviewer_id(authorization: str | None) -> str:
+    """Validate a Supabase Auth JWT; never trust a client-provided reviewer ID."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="A Supabase Auth bearer token is required.")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        auth_client = create_client(settings.supabase_url, settings.supabase_anon_key)
+        response = auth_client.auth.get_user(token)
+        user = getattr(response, "user", None)
+        if not user or not user.id:
+            raise ValueError("No authenticated user")
+        return str(user.id)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired Supabase Auth token.") from exc
+
+
+def _review_fields(values: dict[str, ReviewFieldValue]) -> dict:
+    """Normalise frontend field wrappers and reject invalid date/amount values."""
+    from app.invoices.fields import DATE_FIELDS, HEADER_FIELDS, MONEY_FIELDS
+
+    result: dict[str, Any] = {key: None for key in HEADER_FIELDS}
+    for key, wrapped in values.items():
+        if key not in result:
+            continue
+        value = wrapped.value
+        if isinstance(value, str):
+            value = value.strip() or None
+        if value is None:
+            result[key] = None
+            continue
+        if key in MONEY_FIELDS:
+            try:
+                result[key] = str(Decimal(str(value)))
+            except (InvalidOperation, ValueError):
+                raise HTTPException(status_code=422, detail=f"{key} must be a valid amount.")
+        elif key in DATE_FIELDS:
+            try:
+                from datetime import date
+                result[key] = date.fromisoformat(str(value)).isoformat()
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"{key} must use YYYY-MM-DD.")
+        else:
+            result[key] = str(value)
+    return result
+
+
 # ==================== Sub-routers (must be included first for route priority) ====================
 
 # Processing Runs sub-router
@@ -125,7 +206,7 @@ async def list_runs(
     try:
         result = list_processing_runs(
             client,
-            client_id=DEFAULT_CLIENT_ID,
+            client_id=_demo_client_id(client),
             page=page,
             page_size=page_size,
         )
@@ -173,7 +254,7 @@ async def list_suppliers_endpoint(
     try:
         result = list_suppliers(
             client,
-            client_id=DEFAULT_CLIENT_ID,
+            client_id=_demo_client_id(client),
             page=page,
             page_size=page_size,
             search=search,
@@ -202,7 +283,7 @@ async def list_approvals_endpoint(
     try:
         result = list_approvals(
             client,
-            client_id=DEFAULT_CLIENT_ID,
+            client_id=_demo_client_id(client),
             page=page,
             page_size=page_size,
             status=status_filter,
@@ -239,9 +320,11 @@ async def get_approval_endpoint(approval_id: str = Path(...)):
 async def approval_action_endpoint(
     approval_id: str = Path(...),
     request: ApprovalActionRequest = None,
+    authorization: Optional[str] = Header(None),
 ):
     """Process an approval action (APPROVE, REJECT, RETURN_FOR_INFORMATION)."""
     _validate_uuid(approval_id)
+    reviewer_id = _verified_reviewer_id(authorization)
     client = _get_client()
     try:
         result = action_approval(
@@ -249,7 +332,7 @@ async def approval_action_endpoint(
             approval_id=approval_id,
             action=request.action.upper(),
             comment=request.comment,
-            actor_id=request.actor_id,
+            actor_id=reviewer_id,
         )
     except RepositoryError as exc:
         raise HTTPException(
@@ -285,7 +368,7 @@ async def list_exceptions_endpoint(
     try:
         result = list_exceptions(
             client,
-            client_id=DEFAULT_CLIENT_ID,
+            client_id=_demo_client_id(client),
             page=page,
             page_size=page_size,
             severity=severity_filter,
@@ -395,36 +478,17 @@ router.include_router(exceptions_router)
 # ==================== Dashboard Metrics ====================
 
 @router.get("/dashboard/metrics")
-async def dashboard_metrics():
+async def dashboard_metrics(date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None), risk_level: Optional[str] = Query(None), invoice_status: Optional[str] = Query(None)):
     """Return dashboard metrics for the overview page."""
     client = _get_client()
     try:
-        # Total business invoices
-        inv_result = client.table("invoices").select("id", count="exact").execute()
-        total_invoices = inv_result.count or 0
-
-        # Invoices by processing status
-        status_result = client.table("invoices").select("processing_status", count="exact").execute()
-        statuses = status_result.data or []
-        invoices_received = sum(1 for s in statuses if s.get("processing_status") == "RECEIVED")
-        invoices_awaiting_review = sum(1 for s in statuses if s.get("processing_status") == "EXTRACTED")
-
-        # Queued processing runs
-        runs_result = client.table("processing_runs").select("id", count="exact").eq("status", "QUEUED").execute()
-        queued_runs = runs_result.count or 0
-
+        return ai_dashboard_metrics(client, _demo_client_id(client), date_from, date_to, risk_level, invoice_status)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch metrics: {exc}",
         )
 
-    return {
-        "total_invoices": total_invoices,
-        "invoices_received": invoices_received,
-        "queued_processing_runs": queued_runs,
-        "invoices_awaiting_review": invoices_awaiting_review,
-    }
 
 
 @router.get("/config/status")
@@ -538,11 +602,23 @@ async def upload_invoice(file: UploadFile = File(...)):
             detail=f"Could not persist intake draft: {exc}",
         )
 
+    try:
+        invoice = create_invoice_for_draft(client, draft)
+    except RepositoryError as exc:
+        # The upload is not successful unless the primary invoice register is
+        # available too. The retained draft records the recoverable intake.
+        update_draft_conversion(client, draft["id"], None, "FAILED")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not create invoice record: {exc}",
+        )
+
     extracted = extraction.get("fields", {})
     line_items = extraction.get("line_items", [])
     response = {
         "draft_id": draft["id"],
-        "status": draft["processing_status"],
+        "invoice_id": invoice["id"],
+        "status": invoice.get("processing_status", "DRAFT"),
         "filename": file.filename,
         "file_size_bytes": len(data),
         "sha256": sha256,
@@ -577,7 +653,7 @@ async def list_invoices_endpoint(
     try:
         result = list_invoices(
             client,
-            client_id=DEFAULT_CLIENT_ID,
+            client_id=_demo_client_id(client),
             page=page,
             page_size=page_size,
             search=search,
@@ -611,8 +687,34 @@ async def get_invoice_endpoint(invoice_id: str = Path(...)):
     return invoice
 
 
+async def _run_analysis(invoice_id: str, run_id: str) -> None:
+    """Background worker: deterministic checks first, then advisory AI analysis."""
+    client = _get_client()
+    update_invoice_status(client, invoice_id, "PROCESSING")
+    invoice = get_invoice(client, invoice_id)
+    if not invoice:
+        return
+    checks = validate_invoice(invoice, invoice.get("items", []), duplicate_invoice_exists(client, invoice))
+    for check in checks:
+        insert_validation_result(client, {"processing_run_id": run_id, "stage": "PHASE_2A", **check})
+    attempt = next_analysis_attempt(client, invoice_id)
+    try:
+        analysis = await analyse_invoice(invoice, invoice.get("items", []), checks)
+        insert_invoice_analysis(client, {"invoice_id": invoice_id, "processing_run_id": run_id, "attempt_number": attempt,
+            "status": "COMPLETED", **analysis.model_dump(mode="json")})
+        hard_failure = any(result["status"] == "FAILED" for result in checks)
+        stage = "REVIEW_REQUIRED" if hard_failure or analysis.recommendation != "APPROVE" else "HUMAN_APPROVAL"
+        client.table("invoices").update({"processing_status": "PENDING_APPROVAL", "current_stage": stage}).eq("id", invoice_id).execute()
+        update_processing_run(client, run_id, "COMPLETED", {"recommendation": analysis.recommendation, "deterministic_failures": hard_failure})
+    except Exception as exc:
+        insert_invoice_analysis(client, {"invoice_id": invoice_id, "processing_run_id": run_id, "attempt_number": attempt,
+            "status": "FAILED", "findings": [], "validation_results": checks, "provider_error": str(exc)})
+        client.table("invoices").update({"processing_status": "PENDING_APPROVAL", "current_stage": "REVIEW_REQUIRED"}).eq("id", invoice_id).execute()
+        update_processing_run(client, run_id, "COMPLETED", {"analysis_status": "FAILED", "provider_error": str(exc)})
+
+
 @router.post("/{invoice_id}/process")
-async def process_invoice(invoice_id: str = Path(...)):
+async def process_invoice(background_tasks: BackgroundTasks, invoice_id: str = Path(...)):
     """Start or retry invoice processing idempotently."""
     _validate_uuid(invoice_id)
     client = _get_client()
@@ -661,10 +763,33 @@ async def process_invoice(invoice_id: str = Path(...)):
             detail=f"Could not create processing run: {exc}",
         )
     
-    # Update invoice status
-    update_invoice_status(client, invoice_id, "EXTRACTING")
+    # Queue first, then execute the bounded analysis workflow outside the response.
+    update_invoice_status(client, invoice_id, "QUEUED")
+    background_tasks.add_task(_run_analysis, invoice_id, run["id"])
     
     return {"run_id": run["id"], "run_number": run_number, "status": "QUEUED"}
+
+
+@router.post("/{invoice_id}/analysis")
+async def retry_analysis(background_tasks: BackgroundTasks, invoice_id: str = Path(...)):
+    """Explicit retry; creates a new processing run and preserves prior analysis history."""
+    _validate_uuid(invoice_id)
+    return await process_invoice(background_tasks, invoice_id)
+
+
+@router.get("/{invoice_id}/analysis/latest")
+async def get_latest_analysis(invoice_id: str = Path(...)):
+    _validate_uuid(invoice_id)
+    result = latest_invoice_analysis(_get_client(), invoice_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="No analysis has been generated for this invoice.")
+    return result
+
+
+@router.get("/{invoice_id}/analysis/history")
+async def get_analysis_history(invoice_id: str = Path(...)):
+    _validate_uuid(invoice_id)
+    return {"analyses": invoice_analysis_history(_get_client(), invoice_id)}
 
 
 @router.get("/drafts/{draft_id}")
@@ -689,6 +814,7 @@ async def get_draft(draft_id: str = Path(...)):
     summary = draft.get("extracted_data") or {}
     return {
         "draft_id": draft["id"],
+        "invoice_id": draft.get("converted_invoice_id"),
         "status": draft["processing_status"],
         "filename": draft["original_filename"],
         "file_size_bytes": draft["file_size_bytes"],
@@ -705,9 +831,11 @@ async def get_draft(draft_id: str = Path(...)):
 
 
 @router.post("/drafts/{draft_id}/save")
-async def save_draft(draft_id: str = Path(...)):
-    """Save edited draft data (placeholder for future persistence)."""
+async def save_draft(request: DraftSaveRequest | None = None, draft_id: str = Path(...)):
+    """Persist reviewed fields and line items to the draft and primary invoice."""
     _validate_uuid(draft_id)
+    if request is None:
+        raise HTTPException(status_code=422, detail="Request body is required.")
     client = _get_client()
     try:
         result = client.table("invoice_intake_drafts").select("*").eq("id", draft_id).execute()
@@ -722,17 +850,18 @@ async def save_draft(draft_id: str = Path(...)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Draft not found.",
         )
+    fields = _review_fields(request.fields)
+    line_items = [item.model_dump(mode="json") for item in request.line_items]
     try:
-        client.table("invoice_intake_drafts").update({
-            "processing_status": "READY_FOR_VALIDATION",
-            "updated_at": "now()",
-        }).eq("id", draft_id).execute()
+        invoice = update_draft_and_invoice(client, data[0], fields, line_items)
+    except RepositoryError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Save failed: {exc}",
         )
-    return {"draft_id": draft_id, "status": "READY_FOR_VALIDATION", "saved": True}
+    return {"draft_id": draft_id, "invoice_id": invoice["id"], "status": "DRAFT", "saved": True}
 
 
 @router.post("/drafts/{draft_id}/convert")
@@ -771,8 +900,6 @@ async def convert_draft(
         result = convert_draft_to_invoice(
             client,
             draft_id=draft_id,
-            client_id=DEFAULT_CLIENT_ID,
-            client_entity_id=DEFAULT_CLIENT_ID,
         )
     except RepositoryError as exc:
         # Mark draft as failed on conversion error
@@ -781,7 +908,9 @@ async def convert_draft(
         except Exception:
             pass
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_409_CONFLICT
+            if "not configured" in str(exc) or "not found" in str(exc).lower()
+            else status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         )
     except Exception as exc:

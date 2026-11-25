@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Dict, Any
 from app.config import settings
 from supabase import create_client, Client
@@ -5,6 +7,9 @@ from supabase import create_client, Client
 
 class RepositoryError(Exception):
     pass
+
+
+DEMO_WORKSPACE_NAME = "Invoice Intelligence Demo Workspace"
 
 
 def _client() -> Client:
@@ -70,7 +75,7 @@ def list_invoices(
     if search:
         query = query.or_(
             f"invoice_number.ilike.%{search}%,"
-            f"supplier_name.ilike.%{search}%,"
+            f"supplier_legal_name.ilike.%{search}%,"
             f"po_number.ilike.%{search}%"
         )
     if status:
@@ -85,8 +90,27 @@ def list_invoices(
     query = query.range(start, end)
     
     result = query.execute()
+    invoices = result.data or []
+    invoice_ids = [row["id"] for row in invoices]
+    drafts_by_invoice: dict[str, str] = {}
+    if invoice_ids:
+        drafts = (
+            client.table("invoice_intake_drafts")
+            .select("id, converted_invoice_id")
+            .in_("converted_invoice_id", invoice_ids)
+            .execute()
+            .data
+            or []
+        )
+        drafts_by_invoice = {
+            row["converted_invoice_id"]: row["id"]
+            for row in drafts
+            if row.get("converted_invoice_id")
+        }
+    for invoice in invoices:
+        invoice["draft_id"] = drafts_by_invoice.get(invoice["id"])
     return {
-        "invoices": result.data or [],
+        "invoices": invoices,
         "total": result.count or 0,
         "page": page,
         "page_size": page_size,
@@ -148,7 +172,10 @@ def insert_invoice_document(client: Client, document: dict) -> dict:
 
 def update_invoice_status(client: Client, invoice_id: str, processing_status: str, approval_status: Optional[str] = None) -> dict:
     """Update invoice processing and/or approval status."""
-    update_data = {"processing_status": processing_status, "updated_at": "now()"}
+    update_data = {
+        "processing_status": processing_status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
     if approval_status:
         update_data["approval_status"] = approval_status
     result = (
@@ -256,6 +283,92 @@ def insert_validation_result(client: Client, validation: dict) -> dict:
     if not data:
         raise RepositoryError("Insert validation returned no data")
     return data[0]
+
+
+def duplicate_invoice_exists(client: Client, invoice: dict) -> bool:
+    gstin, number = invoice.get("supplier_gstin"), invoice.get("invoice_number")
+    if not gstin or not number:
+        return False
+    rows = (client.table("invoices").select("id").eq("supplier_gstin", gstin)
+        .eq("invoice_number", number).neq("id", invoice["id"]).execute().data or [])
+    return bool(rows)
+
+
+def next_analysis_attempt(client: Client, invoice_id: str) -> int:
+    rows = (client.table("invoice_ai_analyses").select("attempt_number").eq("invoice_id", invoice_id)
+        .order("attempt_number", desc=True).limit(1).execute().data or [])
+    return (rows[0]["attempt_number"] if rows else 0) + 1
+
+
+def insert_invoice_analysis(client: Client, payload: dict) -> dict:
+    result = client.table("invoice_ai_analyses").insert(payload).execute()
+    data = result.data or []
+    if not data:
+        raise RepositoryError("Invoice analysis insert returned no data")
+    return data[0]
+
+
+def latest_invoice_analysis(client: Client, invoice_id: str) -> dict | None:
+    rows = (client.table("invoice_ai_analyses").select("*").eq("invoice_id", invoice_id)
+        .order("created_at", desc=True).limit(1).execute().data or [])
+    return rows[0] if rows else None
+
+
+def invoice_analysis_history(client: Client, invoice_id: str) -> list[dict]:
+    return (client.table("invoice_ai_analyses").select("*").eq("invoice_id", invoice_id)
+        .order("created_at", desc=True).execute().data or [])
+
+
+def ai_dashboard_metrics(client: Client, client_id: str, date_from: str | None = None, date_to: str | None = None,
+                         risk_level: str | None = None, invoice_status: str | None = None) -> dict:
+    """Aggregate persisted invoice, analysis, run, and approval records in Python."""
+    invoice_query = client.table("invoices").select("id,processing_status,created_at").eq("client_id", client_id)
+    if date_from: invoice_query = invoice_query.gte("created_at", date_from)
+    if date_to: invoice_query = invoice_query.lte("created_at", date_to)
+    if invoice_status: invoice_query = invoice_query.eq("processing_status", invoice_status)
+    invoices = invoice_query.execute().data or []
+    ids = [row["id"] for row in invoices]
+    empty = {"total_invoices_analysed": 0, "recommendations": {}, "human_decisions": {}, "comparison": {}, "override_rate": None, "risk_distribution": {}, "common_findings": [], "average_submission_to_decision_hours": None}
+    if not ids: return empty
+    analyses = client.table("invoice_ai_analyses").select("*").in_("invoice_id", ids).eq("status", "COMPLETED").order("created_at", desc=True).execute().data or []
+    latest = {}
+    for analysis in analyses:
+        latest.setdefault(analysis["invoice_id"], analysis)
+    if risk_level: latest = {key: value for key, value in latest.items() if value.get("risk_level") == risk_level}
+    active_ids = list(latest)
+    if not active_ids: return empty
+    approvals = client.table("approvals").select("invoice_id,status,decided_at").in_("invoice_id", active_ids).in_("status", ["APPROVED", "REJECTED"]).order("decided_at", desc=True).execute().data or []
+    final = {}
+    for approval in approvals:
+        final.setdefault(approval["invoice_id"], approval)
+    runs = client.table("processing_runs").select("invoice_id,created_at").in_("invoice_id", active_ids).order("created_at").execute().data or []
+    submitted = {}
+    for run in runs: submitted.setdefault(run["invoice_id"], run.get("created_at"))
+    recommendations, human, comparison, risks, findings = {}, {}, {}, {}, {}
+    paired = overrides = 0; durations = []
+    for invoice_id, analysis in latest.items():
+        rec, risk = analysis.get("recommendation"), analysis.get("risk_level")
+        recommendations[rec] = recommendations.get(rec, 0) + 1
+        risks[risk] = risks.get(risk, 0) + 1
+        for finding in analysis.get("findings") or []:
+            key = finding.get("category") or "uncategorised"
+            findings[key] = findings.get(key, 0) + 1
+        for validation in analysis.get("validation_results") or []:
+            if validation.get("status") == "FAILED":
+                key = validation.get("rule_code") or "validation_failure"
+                findings[key] = findings.get(key, 0) + 1
+        decision = final.get(invoice_id)
+        if decision:
+            outcome = decision["status"]; human[outcome] = human.get(outcome, 0) + 1
+            comparison[f"{rec} → {outcome}"] = comparison.get(f"{rec} → {outcome}", 0) + 1
+            paired += 1
+            if (rec == "APPROVE" and outcome != "APPROVED") or (rec == "REJECT" and outcome != "REJECTED") or rec == "REQUEST_CLARIFICATION": overrides += 1
+            if submitted.get(invoice_id) and decision.get("decided_at"):
+                durations.append((datetime.fromisoformat(decision["decided_at"].replace("Z", "+00:00")) - datetime.fromisoformat(submitted[invoice_id].replace("Z", "+00:00"))).total_seconds() / 3600)
+    return {"total_invoices_analysed": len(latest), "recommendations": recommendations, "human_decisions": human,
+            "comparison": comparison, "override_rate": round(overrides / paired * 100, 2) if paired else None,
+            "risk_distribution": risks, "common_findings": [{"category": key, "count": value} for key, value in sorted(findings.items(), key=lambda item: item[1], reverse=True)[:10]],
+            "average_submission_to_decision_hours": round(sum(durations) / len(durations), 2) if durations else None}
 
 
 # ==================== Suppliers ====================
@@ -582,6 +695,133 @@ def get_invoice_by_draft_id(client: Client, draft_id: str) -> dict | None:
     return get_invoice(client, invoice_id)
 
 
+def get_draft_by_invoice_id(client: Client, invoice_id: str) -> dict | None:
+    result = (
+        client.table("invoice_intake_drafts")
+        .select("*")
+        .eq("converted_invoice_id", invoice_id)
+        .execute()
+    )
+    data = result.data or []
+    return data[0] if data else None
+
+
+def resolve_demo_workspace(client: Client) -> tuple[str, str]:
+    """Return the active workspace seeded by migration 0004."""
+    clients = (
+        client.table("clients")
+        .select("id")
+        .eq("display_name", DEMO_WORKSPACE_NAME)
+        .eq("status", "ACTIVE")
+        .execute()
+        .data
+        or []
+    )
+    if not clients:
+        raise RepositoryError(
+            "Demo workspace is missing. Apply migration 0005_unified_invoice_register_schema.sql."
+        )
+    client_id = clients[0]["id"]
+    entities = (
+        client.table("client_entities")
+        .select("id")
+        .eq("client_id", client_id)
+        .eq("is_active", True)
+        .execute()
+        .data
+        or []
+    )
+    if not entities:
+        raise RepositoryError("Demo workspace entity is missing. Apply migration 0005_unified_invoice_register_schema.sql.")
+    return client_id, entities[0]["id"]
+
+
+def create_invoice_for_draft(client: Client, draft: dict) -> dict:
+    """Create the primary DRAFT invoice and its children for a newly uploaded draft."""
+    client_id, client_entity_id = resolve_demo_workspace(client)
+    summary = draft.get("extracted_data") or {}
+    fields = summary.get("fields") or {}
+    invoice = insert_invoice(client, {
+        "client_id": client_id,
+        "client_entity_id": client_entity_id,
+        "supplier_legal_name": fields.get("supplier_legal_name"),
+        "supplier_gstin": fields.get("supplier_gstin"),
+        "supplier_address": fields.get("supplier_address"),
+        "invoice_number": fields.get("invoice_number"),
+        "invoice_date": fields.get("invoice_date"),
+        "due_date": fields.get("due_date"),
+        "buyer_legal_name": fields.get("buyer_legal_name"),
+        "buyer_gstin": fields.get("buyer_gstin"),
+        "po_number": fields.get("po_number"),
+        "currency": fields.get("currency"),
+        "taxable_value": fields.get("taxable_value"),
+        "cgst_amount": fields.get("cgst"),
+        "sgst_amount": fields.get("sgst"),
+        "igst_amount": fields.get("igst"),
+        "total_tax": fields.get("total_tax"),
+        "total_amount": fields.get("invoice_grand_total"),
+        "procurement_type": "PO" if fields.get("po_number") else "NON_PO",
+        "processing_status": "DRAFT",
+        "current_stage": "REVIEW",
+        "source_file_sha256": draft["sha256"],
+    })
+    invoice_id = invoice["id"]
+    lines = []
+    for number, item in enumerate(summary.get("line_items") or [], start=1):
+        lines.append({
+            "invoice_id": invoice_id, "line_number": number,
+            "description": item.get("description"), "hsn_sac": item.get("hsn_sac"),
+            "quantity": item.get("quantity"), "unit_price": item.get("unit_price"),
+            "taxable_value": item.get("taxable_value"), "cgst_amount": item.get("cgst"),
+            "sgst_amount": item.get("sgst"), "igst_amount": item.get("igst"),
+        })
+    insert_invoice_items(client, invoice_id, lines)
+    insert_invoice_document(client, {
+        "invoice_id": invoice_id, "storage_path": draft["storage_path"],
+        "original_filename": draft["original_filename"], "mime_type": draft["mime_type"],
+        "sha256": draft["sha256"], "document_type": "INVOICE",
+        "extraction_method": draft.get("extraction_method"),
+    })
+    update_draft_conversion(client, draft["id"], invoice_id, "CONVERTED")
+    return invoice
+
+
+def update_draft_and_invoice(client: Client, draft: dict, fields: dict, line_items: list[dict]) -> dict:
+    """Persist reviewed fields to the intake snapshot and linked invoice."""
+    invoice_id = draft.get("converted_invoice_id")
+    if not invoice_id:
+        raise RepositoryError("Draft is not linked to an invoice.")
+    summary = draft.get("extracted_data") or {}
+    summary["fields"] = fields
+    summary["line_items"] = line_items
+    summary["field_status"] = {key: "found" if value is not None else "missing" for key, value in fields.items()}
+    updated_at = datetime.now(timezone.utc).isoformat()
+    client.table("invoice_intake_drafts").update({
+        "extracted_data": summary, "processing_status": "READY_FOR_VALIDATION", "updated_at": updated_at,
+    }).eq("id", draft["id"]).execute()
+    client.table("invoices").update({
+        "supplier_legal_name": fields.get("supplier_legal_name"), "supplier_gstin": fields.get("supplier_gstin"),
+        "supplier_address": fields.get("supplier_address"), "invoice_number": fields.get("invoice_number"),
+        "invoice_date": fields.get("invoice_date"), "due_date": fields.get("due_date"),
+        "buyer_legal_name": fields.get("buyer_legal_name"), "buyer_gstin": fields.get("buyer_gstin"),
+        "po_number": fields.get("po_number"), "currency": fields.get("currency"),
+        "taxable_value": fields.get("taxable_value"), "cgst_amount": fields.get("cgst"),
+        "sgst_amount": fields.get("sgst"), "igst_amount": fields.get("igst"),
+        "total_tax": fields.get("total_tax"), "total_amount": fields.get("invoice_grand_total"),
+        "procurement_type": "PO" if fields.get("po_number") else "NON_PO",
+        "processing_status": "DRAFT", "current_stage": "REVIEW", "updated_at": updated_at,
+    }).eq("id", invoice_id).execute()
+    client.table("invoice_items").delete().eq("invoice_id", invoice_id).execute()
+    insert_invoice_items(client, invoice_id, [
+        {"invoice_id": invoice_id, "line_number": number, "description": item.get("description"),
+         "hsn_sac": item.get("hsn_sac"), "quantity": item.get("quantity"),
+         "unit_price": item.get("unit_price"), "taxable_value": item.get("taxable_value"),
+         "cgst_amount": item.get("cgst"), "sgst_amount": item.get("sgst"), "igst_amount": item.get("igst")}
+        for number, item in enumerate(line_items, start=1)
+    ])
+    return get_invoice(client, invoice_id) or {"id": invoice_id}
+
+
 def update_draft_conversion(
     client: Client,
     draft_id: str,
@@ -608,13 +848,85 @@ def update_draft_conversion(
     return data[0]
 
 
+def resolve_client_from_buyer(
+    client: Client,
+    buyer_gstin: str | None,
+    buyer_name: str | None,
+) -> tuple[str, str]:
+    """Resolve client_id and client_entity_id from extracted buyer data.
+
+    Looks up client_entities by buyer GSTIN (primary) or buyer legal name
+    (fallback). Verifies the entity is active and the owning client is ACTIVE.
+
+    Returns (client_id, client_entity_id).
+    Raises RepositoryError if no matching active client/entity is found.
+    """
+    if not buyer_gstin and not buyer_name:
+        raise RepositoryError(
+            "Cannot resolve buyer: no GSTIN or legal name extracted from invoice."
+        )
+
+    # Try GSTIN match first (most reliable)
+    if buyer_gstin:
+        result = (
+            client.table("client_entities")
+            .select("id, client_id, is_active")
+            .eq("gstin", buyer_gstin)
+            .execute()
+        )
+        entities = result.data or []
+        for entity in entities:
+            if not entity.get("is_active"):
+                continue
+            client_res = (
+                client.table("clients")
+                .select("id, status")
+                .eq("id", entity["client_id"])
+                .eq("status", "ACTIVE")
+                .execute()
+            )
+            clients = client_res.data or []
+            if clients:
+                return (clients[0]["id"], entity["id"])
+
+    # Fallback: match by legal name (case-insensitive)
+    if buyer_name:
+        result = (
+            client.table("client_entities")
+            .select("id, client_id, is_active, legal_name, gstin")
+            .ilike("legal_name", buyer_name)
+            .execute()
+        )
+        entities = result.data or []
+        for entity in entities:
+            if not entity.get("is_active"):
+                continue
+            client_res = (
+                client.table("clients")
+                .select("id, status")
+                .eq("id", entity["client_id"])
+                .eq("status", "ACTIVE")
+                .execute()
+            )
+            clients = client_res.data or []
+            if clients:
+                return (clients[0]["id"], entity["id"])
+
+    raise RepositoryError(
+        "Buyer entity not configured: no active client entity matches the "
+        f"extracted buyer GSTIN ({buyer_gstin or '—'}) or name "
+        f"({buyer_name or '—'}). Onboard the client before converting."
+    )
+
+
 def convert_draft_to_invoice(
     client: Client,
     draft_id: str,
-    client_id: str,
-    client_entity_id: str,
 ) -> dict:
     """Convert an intake draft into a business invoice record.
+
+    Resolves client_id and client_entity_id from the extracted buyer data.
+    Does not accept or use hardcoded client IDs.
 
     Returns a dict with keys:
       - invoice_id: the invoice UUID
@@ -639,9 +951,20 @@ def convert_draft_to_invoice(
     fields = extracted_data.get("fields") or {}
     line_items = extracted_data.get("line_items") or []
 
+    # Resolve client from buyer data
+    buyer_gstin = fields.get("buyer_gstin")
+    buyer_name = fields.get("buyer_legal_name")
+    client_id, client_entity_id = resolve_client_from_buyer(
+        client, buyer_gstin, buyer_name
+    )
+
     # Determine procurement type from PO number presence
     po_number = fields.get("po_number")
     procurement_type = "PO" if po_number else "NON_PO"
+
+    # Helper to default None to 0 for NOT NULL columns
+    def _zero(val):
+        return val if val is not None else 0
 
     # Insert invoice record
     invoice_payload = {
@@ -653,14 +976,14 @@ def convert_draft_to_invoice(
         "procurement_type": procurement_type,
         "purchase_order_id": None,  # PO matching is Phase 2
         "contract_id": None,
-        "taxable_value": fields.get("taxable_value"),
-        "cgst_amount": fields.get("cgst"),
-        "sgst_amount": fields.get("sgst"),
-        "igst_amount": fields.get("igst"),
-        "cess_amount": fields.get("cess"),
-        "other_charges": None,
-        "discount_amount": None,
-        "total_amount": fields.get("invoice_grand_total"),
+        "taxable_value": _zero(fields.get("taxable_value")),
+        "cgst_amount": _zero(fields.get("cgst")),
+        "sgst_amount": _zero(fields.get("sgst")),
+        "igst_amount": _zero(fields.get("igst")),
+        "cess_amount": _zero(fields.get("cess")),
+        "other_charges": _zero(fields.get("other_charges")),
+        "discount_amount": _zero(fields.get("discount_amount")),
+        "total_amount": _zero(fields.get("invoice_grand_total")),
         "processing_status": "RECEIVED",
         "approval_status": "PENDING",
         "source_file_sha256": draft.get("sha256"),
@@ -679,15 +1002,15 @@ def convert_draft_to_invoice(
                 "description": item.get("description"),
                 "item_code": None,
                 "hsn_sac": item.get("hsn_sac"),
-                "quantity": item.get("quantity"),
+                "quantity": _zero(item.get("quantity")),
                 "unit_of_measure": None,
-                "unit_price": item.get("unit_price"),
-                "taxable_value": item.get("taxable_value"),
+                "unit_price": _zero(item.get("unit_price")),
+                "taxable_value": _zero(item.get("taxable_value")),
                 "gst_rate": None,
-                "cgst_amount": item.get("cgst"),
-                "sgst_amount": item.get("sgst"),
-                "igst_amount": item.get("igst"),
-                "total_amount": item.get("taxable_value"),
+                "cgst_amount": _zero(item.get("cgst")),
+                "sgst_amount": _zero(item.get("sgst")),
+                "igst_amount": _zero(item.get("igst")),
+                "total_amount": _zero(item.get("taxable_value")),
             })
         insert_invoice_items(client, invoice_id, item_payloads)
 

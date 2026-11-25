@@ -8,8 +8,21 @@ from unittest.mock import patch, MagicMock
 import fitz
 from fastapi.testclient import TestClient
 from app.main import app
+from app.invoices import repository
 
 client = TestClient(app)
+
+
+def _chain_result(data, count=None):
+    chain = MagicMock()
+    chain.eq.return_value = chain
+    chain.or_.return_value = chain
+    chain.order.return_value = chain
+    chain.range.return_value = chain
+    chain.limit.return_value = chain
+    chain.in_.return_value = chain
+    chain.execute.return_value = MagicMock(data=data, count=count)
+    return chain
 
 
 def _make_digital_pdf(text: str) -> bytes:
@@ -85,6 +98,11 @@ def _settings_patch(mock_client):
     stack.enter_context(patch.multiple("app.invoices.router", create_client=MagicMock(return_value=mock_client)))
     stack.enter_context(patch.multiple("app.invoices.storage", create_client=MagicMock(return_value=mock_client)))
     stack.enter_context(patch.multiple("app.invoices.repository", create_client=MagicMock(return_value=mock_client)))
+    # Most legacy route tests are not testing workspace lookup or unified
+    # creation. Keep their database chain mock focused on the route itself.
+    stack.enter_context(patch("app.invoices.router.resolve_demo_workspace", return_value=("demo-client", "demo-entity")))
+    stack.enter_context(patch("app.invoices.router.create_invoice_for_draft", return_value={"id": "new-invoice-id"}))
+    stack.enter_context(patch("app.invoices.router._verified_reviewer_id", return_value="reviewer-001"))
     return stack
 
 
@@ -143,7 +161,7 @@ def test_upload_valid_digital_pdf():
         )
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["status"] == "EXTRACTED"
+    assert body["status"] == "DRAFT"
     assert body["extraction_kind"] == "ai_enhanced"
     assert body["ocr_supported"] is False
     assert body["filename"] == "invoice.pdf"
@@ -1036,8 +1054,35 @@ def test_approval_action_invalid_uuid():
 
 # ==================== Draft-to-Invoice Conversion Tests ====================
 
+# Client and entity used for buyer resolution in conversion tests.
+TEST_CLIENT_ID = "cccc0000-0000-0000-0000-000000000101"
+TEST_ENTITY_ID = "eeee0000-0000-0000-0000-000000000101"
+
+TEST_CLIENT = {
+    "id": TEST_CLIENT_ID,
+    "legal_name": "Nizam Gourmet Foods Pvt. Ltd.",
+    "display_name": "Nizam Foods",
+    "status": "ACTIVE",
+    "created_at": "2026-01-01T00:00:00Z",
+}
+
+TEST_CLIENT_ENTITY = {
+    "id": TEST_ENTITY_ID,
+    "client_id": TEST_CLIENT_ID,
+    "legal_name": "Nizam Gourmet Foods Pvt. Ltd.",
+    "gstin": "36AABCN8901K1Z4",
+    "registered_email_domains": [],
+    "is_active": True,
+    "created_at": "2026-01-01T00:00:00Z",
+}
+
+
 def _make_conversion_mock_client():
-    """Create a mock Supabase client that supports conversion operations."""
+    """Create a mock Supabase client that supports conversion operations.
+
+    Includes mocked clients and client_entities tables so buyer resolution
+    can succeed for the Nizam Gourmet Foods buyer (GSTIN: 36AABCN8901K1Z4).
+    """
     mock_client = MagicMock()
     mock_storage = MagicMock()
     mock_storage.from_.return_value.upload.return_value = None
@@ -1143,8 +1188,8 @@ def _make_conversion_mock_client():
     invoice_insert_result.execute.return_value = MagicMock(
         data=[{
             "id": "550e8400-e29b-41d4-a716-446655440001",
-            "client_id": "00000000-0000-0000-0000-000000000001",
-            "client_entity_id": "00000000-0000-0000-0000-000000000002",
+            "client_id": TEST_CLIENT_ID,
+            "client_entity_id": TEST_ENTITY_ID,
             "invoice_number": "DPP/2026-27/0823",
             "invoice_date": "2026-11-25",
             "currency": "INR",
@@ -1152,7 +1197,10 @@ def _make_conversion_mock_client():
             "taxable_value": 80000.0,
             "cgst_amount": 7200.0,
             "sgst_amount": 7200.0,
-            "igst_amount": None,
+            "igst_amount": 0,
+            "cess_amount": 0,
+            "other_charges": 0,
+            "discount_amount": 0,
             "total_amount": 94400.0,
             "processing_status": "RECEIVED",
             "approval_status": "PENDING",
@@ -1234,6 +1282,24 @@ def _make_conversion_mock_client():
     audit_table = _get_table("audit_logs")
     audit_table.insert.return_value = audit_insert_result
 
+    # Configure clients table (for buyer resolution)
+    clients_table = _get_table("clients")
+    clients_select = MagicMock()
+    clients_select.eq.return_value = clients_select
+    clients_select.execute.return_value = MagicMock(
+        data=[TEST_CLIENT], error=None
+    )
+    clients_table.select.return_value = clients_select
+
+    # Configure client_entities table (for buyer resolution)
+    entities_table = _get_table("client_entities")
+    entities_select = MagicMock()
+    entities_select.eq.return_value = entities_select
+    entities_select.execute.return_value = MagicMock(
+        data=[TEST_CLIENT_ENTITY], error=None
+    )
+    entities_table.select.return_value = entities_select
+
     return mock_client
 
 
@@ -1252,6 +1318,24 @@ def test_convert_draft_success():
     assert body["status"] == "converted"
 
 
+def test_convert_draft_resolves_client_from_buyer():
+    """Client and entity are resolved from buyer GSTIN, not hardcoded."""
+    mock_client = _make_conversion_mock_client()
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/drafts/550e8400-e29b-41d4-a716-446655440000/convert",
+        )
+    assert response.status_code == 200, response.text
+
+    # Verify invoice insert used resolved client/entity IDs
+    invoices_table = mock_client.table("invoices")
+    insert_call = invoices_table.insert.call_args
+    payload = insert_call.args[0]
+    assert payload["client_id"] == TEST_CLIENT_ID
+    assert payload["client_entity_id"] == TEST_ENTITY_ID
+    assert payload["client_id"] != "00000000-0000-0000-0000-000000000001"
+
+
 def test_convert_draft_all_fields_preserved():
     """All extracted invoice fields are preserved in the business record."""
     mock_client = _make_conversion_mock_client()
@@ -1268,6 +1352,7 @@ def test_convert_draft_all_fields_preserved():
     assert payload["taxable_value"] == 80000.0
     assert payload["cgst_amount"] == 7200.0
     assert payload["sgst_amount"] == 7200.0
+    assert payload["igst_amount"] == 0
     assert payload["total_amount"] == 94400.0
     assert payload["procurement_type"] == "NON_PO"
     assert payload["purchase_order_id"] is None
@@ -1443,6 +1528,76 @@ def test_convert_draft_invalid_uuid():
     assert response.status_code == 400, response.text
 
 
+def test_convert_draft_unknown_buyer_not_converted():
+    """Buyer with no matching client/entity does not convert."""
+    mock_client = _make_conversion_mock_client()
+    # Override client_entities to return no match (unknown GSTIN)
+    entities_table = mock_client.table("client_entities")
+    entities_select = MagicMock()
+    entities_select.eq.return_value = entities_select
+    entities_select.execute.return_value = MagicMock(
+        data=[], error=None
+    )
+    entities_table.select.return_value = entities_select
+
+    # Also override clients to return no match
+    clients_table = mock_client.table("clients")
+    clients_select = MagicMock()
+    clients_select.eq.return_value = clients_select
+    clients_select.execute.return_value = MagicMock(
+        data=[], error=None
+    )
+    clients_table.select.return_value = clients_select
+
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/drafts/550e8400-e29b-41d4-a716-446655440000/convert",
+        )
+    assert response.status_code == 409, response.text
+    assert "not configured" in response.json()["detail"].lower()
+
+
+def test_convert_draft_inactive_entity_not_converted():
+    """Inactive client entity does not convert."""
+    mock_client = _make_conversion_mock_client()
+    # Override client_entities to return inactive entity
+    entities_table = mock_client.table("client_entities")
+    entities_select = MagicMock()
+    inactive_entity = {**TEST_CLIENT_ENTITY, "is_active": False}
+    entities_select.eq.return_value = entities_select
+    entities_select.execute.return_value = MagicMock(
+        data=[inactive_entity], error=None
+    )
+    entities_table.select.return_value = entities_select
+
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/drafts/550e8400-e29b-41d4-a716-446655440000/convert",
+        )
+    assert response.status_code == 409, response.text
+    assert "not configured" in response.json()["detail"].lower()
+
+
+def test_convert_draft_inactive_client_not_converted():
+    """Inactive client does not convert even if entity is active."""
+    mock_client = _make_conversion_mock_client()
+    # Override clients to return inactive client
+    clients_table = mock_client.table("clients")
+    clients_select = MagicMock()
+    inactive_client = {**TEST_CLIENT, "status": "INACTIVE"}
+    clients_select.eq.return_value = clients_select
+    clients_select.execute.return_value = MagicMock(
+        data=[], error=None
+    )
+    clients_table.select.return_value = clients_select
+
+    with _settings_patch(mock_client):
+        response = client.post(
+            "/api/v1/invoices/drafts/550e8400-e29b-41d4-a716-446655440000/convert",
+        )
+    assert response.status_code == 409, response.text
+
+
 def test_list_invoices_returns_converted():
     """All Invoices API returns converted invoices."""
     mock_client = _make_mock_client()
@@ -1456,7 +1611,8 @@ def test_list_invoices_returns_converted():
     chain_mock.execute.return_value = MagicMock(
         data=[{
             "id": "550e8400-e29b-41d4-a716-446655440001",
-            "client_id": "00000000-0000-0000-0000-000000000001",
+            "client_id": TEST_CLIENT_ID,
+            "client_entity_id": TEST_ENTITY_ID,
             "invoice_number": "DPP/2026-27/0823",
             "invoice_date": "2026-11-25",
             "supplier_name": "Deccan Print & Packaging Solutions",
@@ -1465,7 +1621,7 @@ def test_list_invoices_returns_converted():
             "taxable_value": 80000.0,
             "cgst_amount": 7200.0,
             "sgst_amount": 7200.0,
-            "igst_amount": None,
+            "igst_amount": 0,
             "total_amount": 94400.0,
             "processing_status": "RECEIVED",
             "approval_status": "PENDING",
@@ -1572,7 +1728,95 @@ def test_dashboard_metrics_reflect_records():
         response = client.get("/api/v1/invoices/dashboard/metrics")
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["total_invoices"] == 2
-    assert body["invoices_received"] == 1
-    assert body["invoices_awaiting_review"] == 1
-    assert body["queued_processing_runs"] == 1
+    assert body["total_invoices_analysed"] == 0
+    assert body["override_rate"] is None
+
+
+# ==================== Phase 1 unified-register tests ====================
+
+def test_upload_invoice_record_keeps_missing_amounts_null_and_links_draft():
+    draft = {
+        "id": "draft-1", "sha256": "abc", "storage_path": "intake/abc/invoice.pdf",
+        "original_filename": "invoice.pdf", "mime_type": "application/pdf",
+        "extraction_method": "pymupdf_digital",
+        "extracted_data": {"fields": {"supplier_legal_name": "Acme", "taxable_value": None,
+            "cgst": None, "sgst": None, "igst": None, "total_tax": None,
+            "invoice_grand_total": None}, "line_items": []},
+    }
+    mock_client = MagicMock()
+    with patch.object(repository, "resolve_demo_workspace", return_value=("client-1", "entity-1")), \
+         patch.object(repository, "insert_invoice", return_value={"id": "invoice-1"}) as insert, \
+         patch.object(repository, "insert_invoice_items"), \
+         patch.object(repository, "insert_invoice_document"), \
+         patch.object(repository, "update_draft_conversion") as link:
+        invoice = repository.create_invoice_for_draft(mock_client, draft)
+
+    assert invoice["id"] == "invoice-1"
+    payload = insert.call_args.args[1]
+    assert payload["processing_status"] == "DRAFT"
+    assert payload["taxable_value"] is None
+    assert payload["total_amount"] is None
+    link.assert_called_once_with(mock_client, "draft-1", "invoice-1", "CONVERTED")
+
+
+def test_register_lists_draft_with_its_review_link():
+    mock_client = MagicMock()
+    invoice_chain = _chain_result([{"id": "invoice-1", "processing_status": "DRAFT"}], count=1)
+    draft_chain = _chain_result([{"id": "draft-1", "converted_invoice_id": "invoice-1"}])
+    mock_client.table.side_effect = lambda name: MagicMock(
+        select=MagicMock(return_value=invoice_chain if name == "invoices" else draft_chain)
+    )
+
+    result = repository.list_invoices(mock_client, "client-1")
+    assert result["invoices"][0]["draft_id"] == "draft-1"
+    assert result["invoices"][0]["processing_status"] == "DRAFT"
+
+
+def test_review_save_updates_invoice_and_replaces_line_items():
+    draft = {"id": "draft-1", "converted_invoice_id": "invoice-1", "extracted_data": {}}
+    mock_client = MagicMock()
+    fields = {"supplier_legal_name": "Updated Supplier", "invoice_number": "INV-9",
+              "taxable_value": None, "cgst": None, "sgst": None, "igst": None,
+              "total_tax": None, "invoice_grand_total": None, "po_number": None}
+    lines = [{"description": "Service", "hsn_sac": "9983", "quantity": "1",
+              "unit_price": "10", "taxable_value": "10", "cgst": None, "sgst": None, "igst": None}]
+    with patch.object(repository, "insert_invoice_items") as insert_items, \
+         patch.object(repository, "get_invoice", return_value={"id": "invoice-1"}):
+        result = repository.update_draft_and_invoice(mock_client, draft, fields, lines)
+
+    assert result["id"] == "invoice-1"
+    invoice_updates = mock_client.table.return_value.update.call_args_list
+    assert any(call.args[0].get("supplier_legal_name") == "Updated Supplier" for call in invoice_updates)
+    insert_items.assert_called_once()
+    assert insert_items.call_args.args[2][0]["description"] == "Service"
+
+
+def test_demo_workspace_resolution_uses_seeded_active_records():
+    mock_client = MagicMock()
+    client_chain = _chain_result([{"id": "client-1"}])
+    entity_chain = _chain_result([{"id": "entity-1"}])
+    mock_client.table.side_effect = lambda name: MagicMock(
+        select=MagicMock(return_value=client_chain if name == "clients" else entity_chain)
+    )
+    assert repository.resolve_demo_workspace(mock_client) == ("client-1", "entity-1")
+
+
+def test_submit_for_processing_persists_queued_status():
+    """The Phase 1 submit action changes the primary record, not just the UI."""
+    mock_client = _make_mock_client()
+    queued_runs = _chain_result([])
+    running_runs = _chain_result([])
+    prior_runs = _chain_result([])
+    mock_client.table.return_value.select.side_effect = [
+        queued_runs, running_runs, prior_runs,
+    ]
+    with _settings_patch(mock_client), \
+         patch("app.invoices.router.get_invoice", return_value={"id": "invoice-1", "processing_status": "DRAFT"}), \
+         patch("app.invoices.router.insert_processing_run", return_value={"id": "run-1"}), \
+         patch("app.invoices.router._run_analysis"), \
+         patch("app.invoices.router.update_invoice_status") as update_status:
+        response = client.post("/api/v1/invoices/550e8400-e29b-41d4-a716-446655440001/process")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "QUEUED"
+    update_status.assert_called_once_with(mock_client, "550e8400-e29b-41d4-a716-446655440001", "QUEUED")

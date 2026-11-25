@@ -1,23 +1,20 @@
 
 -- Invoice Intelligence Workbench: draft-to-invoice conversion tracking.
--- Adds fields to invoice_intake_drafts to track which drafts have been
--- converted into business invoice records, enabling idempotent conversion.
+-- Adds fields to invoice_intake_drafts to track converted business invoices.
 
-alter table public.invoice_intake_drafts
-  add column if not exists converted_invoice_id uuid
-    references public.invoices(id),
-  add column if not exists conversion_status text not null default 'PENDING'
-    check (conversion_status in ('PENDING', 'CONVERTED', 'FAILED')),
-  add column if not exists converted_at timestamptz;
+ALTER TABLE public.invoice_intake_drafts
+    ADD COLUMN IF NOT EXISTS converted_invoice_id uuid
+        REFERENCES public.invoices(id),
+    ADD COLUMN IF NOT EXISTS conversion_status text NOT NULL DEFAULT 'PENDING'
+        CHECK (conversion_status IN ('PENDING', 'CONVERTED', 'FAILED')),
+    ADD COLUMN IF NOT EXISTS converted_at timestamptz;
 
-create index if not exists invoice_intake_drafts_converted_invoice_idx
-  on public.invoice_intake_drafts(converted_invoice_id)
-  where converted_invoice_id is not null;
+-- Index for looking up converted invoices.
+CREATE INDEX IF NOT EXISTS invoice_intake_drafts_converted_invoice_idx
+    ON public.invoice_intake_drafts(converted_invoice_id)
+    WHERE converted_invoice_id IS NOT NULL;
 
-create unique index if not exists invoice_intake_drafts_converted_invoice_unique
-  on public.invoice_intake_drafts(converted_invoice_id)
-  where converted_invoice_id is not null;
-
-alter table public.invoice_intake_drafts
-  add constraint if not exists invoice_intake_drafts_conversion_status_check
-    check (conversion_status in ('PENDING', 'CONVERTED', 'FAILED'));
+-- Prevent one business invoice from being linked to multiple drafts.
+CREATE UNIQUE INDEX IF NOT EXISTS invoice_intake_drafts_converted_invoice_unique
+    ON public.invoice_intake_drafts(converted_invoice_id)
+    WHERE converted_invoice_id IS NOT NULL;

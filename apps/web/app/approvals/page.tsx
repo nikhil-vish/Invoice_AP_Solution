@@ -4,6 +4,8 @@ import { Shell } from "@/components/Shell";
 import { useState, useEffect, useCallback } from "react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 interface ApprovalInvoice {
   invoice_number: string;
@@ -40,6 +42,19 @@ export default function ApprovalsPage() {
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState<{ id: string; action: string; comment: string } | null>(null);
   const [selected, setSelected] = useState<ApprovalTask | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  useEffect(() => setToken(window.localStorage.getItem("supabase_access_token")), []);
+
+  const signIn = async () => {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { setToast({ type: "error", message: "Configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY." }); return; }
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method: "POST", headers: { "apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+      if (!res.ok) throw new Error("Sign-in failed."); const session = await res.json(); window.localStorage.setItem("supabase_access_token", session.access_token); setToken(session.access_token); setPassword(""); setToast({ type: "success", message: "Signed in as reviewer." });
+    } catch (err) { setToast({ type: "error", message: err instanceof Error ? err.message : "Sign-in failed." }); }
+  };
 
   const fetchApprovals = useCallback(async () => {
     setLoading(true);
@@ -86,6 +101,7 @@ export default function ApprovalsPage() {
 
   const submitConfirm = async () => {
     if (!confirm) return;
+    if (!token) { setToast({ type: "error", message: "Sign in with Supabase Auth before deciding." }); return; }
     const { id, action, comment } = confirm;
     const requiresComment = action === "REJECT" || action === "RETURN_FOR_INFORMATION";
     if (requiresComment && !comment.trim()) {
@@ -96,8 +112,8 @@ export default function ApprovalsPage() {
     try {
       const res = await fetch(`${API_BASE_URL}/api/v1/invoices/approvals/${id}/action`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, comment: comment || undefined, actor_id: "current-user" }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action, comment: comment || undefined }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: "Action failed" }));
@@ -166,6 +182,8 @@ export default function ApprovalsPage() {
           <button className="btnGreen" onClick={fetchApprovals}>Retry</button>
         </div>
       )}
+
+      {!token && <div className="reviewPanel full" style={{ marginBottom: 16 }}><h3>Reviewer sign in</h3><p className="muted">A verified Supabase Auth session is required for final decisions.</p><input className="inputField" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} /><input className="inputField" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} style={{ marginTop: 8 }} /><button className="btnGreen" onClick={signIn} style={{ marginTop: 8 }}>Sign in</button></div>}
 
       <div className="filterBar">
         <select

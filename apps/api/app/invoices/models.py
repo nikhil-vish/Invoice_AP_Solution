@@ -1,5 +1,6 @@
 """Pydantic models for structured invoice extraction."""
 
+from datetime import datetime
 from typing import Optional, List, Literal
 from pydantic import BaseModel, Field, field_validator
 from decimal import Decimal
@@ -43,3 +44,22 @@ class ExtractionResult(BaseModel):
     line_items: List[dict] = Field(default_factory=list)
     message: Optional[str] = None
     reasoning_details: Optional[dict] = None
+
+
+class AnalysisFinding(BaseModel):
+    category: str
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    description: str
+    evidence: dict = Field(default_factory=dict)
+    suggested_action: str
+
+
+class InvoiceAnalysis(BaseModel):
+    recommendation: Literal["APPROVE", "REJECT", "REQUEST_CLARIFICATION"]
+    risk_level: Literal["LOW", "MEDIUM", "HIGH"]
+    confidence_score: int = Field(ge=0, le=100, description="Model confidence, not probability of correctness")
+    executive_summary: str
+    findings: List[AnalysisFinding] = Field(default_factory=list)
+    validation_results: List[dict] = Field(default_factory=list)
+    generated_at: datetime
+    model_used: str

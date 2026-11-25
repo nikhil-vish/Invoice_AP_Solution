@@ -8,13 +8,15 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8
 
 interface InvoiceSummary {
   id: string;
-  invoice_number: string;
-  invoice_date: string;
-  supplier_name: string;
-  supplier_gstin: string;
-  total_amount: number;
-  currency: string;
+  draft_id: string | null;
+  invoice_number: string | null;
+  invoice_date: string | null;
+  supplier_legal_name: string | null;
+  supplier_gstin: string | null;
+  total_amount: number | null;
+  currency: string | null;
   processing_status: string;
+  current_stage: string | null;
   approval_status: string;
   created_at: string;
 }
@@ -125,17 +127,8 @@ export default function InvoicesPage() {
           className="filterSelect"
         >
           <option value="">All statuses</option>
-          <option value="RECEIVED">Received</option>
-          <option value="EXTRACTING">Extracting</option>
-          <option value="VALIDATING">Validating</option>
-          <option value="MATCHING">Matching</option>
-          <option value="TAX_CHECK">Tax Check</option>
-          <option value="DECISION_READY">Decision Ready</option>
-          <option value="ON_HOLD">On Hold</option>
-          <option value="APPROVAL_PENDING">Approval Pending</option>
-          <option value="APPROVED">Approved</option>
-          <option value="REJECTED">Rejected</option>
-          <option value="FAILED">Failed</option>
+          <option value="DRAFT">Draft</option>
+          <option value="QUEUED">Queued</option>
         </select>
       </div>
 
@@ -158,7 +151,7 @@ export default function InvoicesPage() {
               <th>GSTIN</th>
               <th>Amount</th>
               <th>Processing</th>
-              <th>Approval</th>
+              <th>Current stage</th>
               <th>Received</th>
             </tr>
           </thead>
@@ -171,22 +164,18 @@ export default function InvoicesPage() {
               </tr>
             ) : (
               invoices.map((inv) => (
-                <tr key={inv.id} style={{ cursor: "pointer" }} onClick={() => window.location.href = `/review/${inv.id}`}>
+                <tr key={inv.id} style={{ cursor: inv.draft_id ? "pointer" : "default" }} onClick={() => inv.draft_id && (window.location.href = `/review/${inv.draft_id}`)}>
                   <td><strong>{inv.invoice_number || "—"}</strong></td>
                   <td>{inv.invoice_date || "—"}</td>
-                  <td>{inv.supplier_name || "—"}</td>
+                  <td>{inv.supplier_legal_name || "—"}</td>
                   <td>{inv.supplier_gstin || "—"}</td>
-                  <td>{formatCurrency(inv.total_amount || 0, inv.currency)}</td>
+                  <td>{formatCurrency(inv.total_amount || 0, inv.currency || "INR")}</td>
                   <td>
                     <span className={`statusBadge ${getStatusColor(inv.processing_status)}`}>
                       {inv.processing_status}
                     </span>
                   </td>
-                  <td>
-                    <span className={`statusBadge ${getStatusColor(inv.approval_status)}`}>
-                      {inv.approval_status}
-                    </span>
-                  </td>
+                  <td>{inv.current_stage || "—"}</td>
                   <td>{inv.created_at ? new Date(inv.created_at).toLocaleDateString() : "—"}</td>
                 </tr>
               ))

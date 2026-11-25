@@ -24,6 +24,7 @@ interface LineItem {
 
 interface ReviewData {
   draft_id: string;
+  invoice_id: string | null;
   status: string;
   filename: string;
   file_size_bytes: number;
@@ -37,11 +38,13 @@ interface ReviewData {
   message: string | null;
 }
 
-interface ConversionState {
-  status: "idle" | "converting" | "success" | "error";
-  invoice_id: string | null;
-  invoice_number: string | null;
-  error: string | null;
+interface Analysis {
+  recommendation: string;
+  risk_level: string;
+  confidence_score: number;
+  executive_summary: string;
+  findings: Array<{ category: string; severity: string; description: string; suggested_action: string }>;
+  model_used: string;
 }
 
 const HEADER_LABELS: Record<string, string> = {
@@ -71,13 +74,10 @@ export default function ReviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editedFields, setEditedFields] = useState<Record<string, FieldValue>>({});
+  const [editedLines, setEditedLines] = useState<LineItem[]>([]);
   const [saved, setSaved] = useState(false);
-  const [conversion, setConversion] = useState<ConversionState>({
-    status: "idle",
-    invoice_id: null,
-    invoice_number: null,
-    error: null,
-  });
+  const [queueing, setQueueing] = useState(false);
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
 
   const fetchData = useCallback(async () => {
     if (!draftId) {
@@ -106,6 +106,14 @@ export default function ReviewPage() {
     fetchData();
   }, [fetchData]);
 
+  const fetchAnalysis = useCallback(async () => {
+    if (!data?.invoice_id) return;
+    const res = await fetch(`${API_BASE_URL}/api/v1/invoices/${data.invoice_id}/analysis/latest`);
+    if (res.ok) setAnalysis(await res.json());
+  }, [data?.invoice_id]);
+
+  useEffect(() => { fetchAnalysis(); }, [fetchAnalysis]);
+
   const initializeEdited = useCallback(() => {
     if (!data) return;
     const next: Record<string, FieldValue> = {};
@@ -116,6 +124,7 @@ export default function ReviewPage() {
       };
     }
     setEditedFields(next);
+    setEditedLines(data.line_items);
   }, [data]);
 
   useEffect(() => {
@@ -130,12 +139,32 @@ export default function ReviewPage() {
     setSaved(false);
   };
 
+  const updateLine = (index: number, key: keyof LineItem, value: string) => {
+    setEditedLines((lines) => lines.map((line, lineIndex) =>
+      lineIndex === index ? { ...line, [key]: value === "" ? null : value } : line,
+    ));
+    setSaved(false);
+  };
+
+  const addLine = () => {
+    setEditedLines((lines) => [...lines, {
+      description: null, hsn_sac: null, quantity: null, unit_price: null,
+      taxable_value: null, cgst: null, sgst: null, igst: null,
+    }]);
+    setSaved(false);
+  };
+
+  const removeLine = (index: number) => {
+    setEditedLines((lines) => lines.filter((_, lineIndex) => lineIndex !== index));
+    setSaved(false);
+  };
+
   const handleSaveDraft = async () => {
     if (!data || !draftId) return;
     const payload = {
       draft_id: data.draft_id,
       fields: editedFields,
-      line_items: data.line_items,
+      line_items: editedLines,
     };
     try {
       const res = await fetch(`${API_BASE_URL}/api/v1/invoices/drafts/${draftId}/save`, {
@@ -143,46 +172,33 @@ export default function ReviewPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error("Save failed.");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || "Save failed.");
+      }
       setSaved(true);
-      setConversion(prev => ({ ...prev, status: "idle", error: null }));
+      await fetchData();
+      window.setTimeout(fetchAnalysis, 500);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed.");
     }
   };
 
-  const handleConvert = async () => {
-    if (!draftId) return;
-    setConversion({ status: "converting", invoice_id: null, invoice_number: null, error: null });
+  const handleSubmit = async () => {
+    if (!data?.invoice_id) return;
+    setQueueing(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/drafts/${draftId}/convert`, {
-        method: "POST",
-      });
+      const res = await fetch(`${API_BASE_URL}/api/v1/invoices/${data.invoice_id}/process`, { method: "POST" });
       if (!res.ok) {
-        let detail = "Conversion failed.";
-        try {
-          const errBody = await res.json();
-          detail = errBody.detail || detail;
-        } catch {
-          // Ignore response parsing errors
-        }
-        throw new Error(detail);
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || "Could not queue invoice.");
       }
-      const json = await res.json();
-      setConversion({
-        status: "success",
-        invoice_id: json.invoice_id,
-        invoice_number: json.invoice_number || null,
-        error: null,
-      });
+      await fetchData();
     } catch (err) {
-      setConversion({
-        status: "error",
-        invoice_id: null,
-        invoice_number: null,
-        error: err instanceof Error ? err.message : "Conversion failed.",
-      });
+      setError(err instanceof Error ? err.message : "Could not queue invoice.");
+    } finally {
+      setQueueing(false);
     }
   };
 
@@ -276,7 +292,6 @@ export default function ReviewPage() {
                     type="text"
                     value={val ?? ""}
                     onChange={(e) => updateField(key, e.target.value)}
-                    disabled={data.extraction_kind === "scanned"}
                     className={isMissing ? "inputMissing" : "inputField"}
                     placeholder={isMissing ? "Not extracted" : undefined}
                   />
@@ -301,51 +316,62 @@ export default function ReviewPage() {
                   <th>CGST</th>
                   <th>SGST</th>
                   <th>IGST</th>
+                  <th aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {data.line_items.map((item, idx) => (
+                {editedLines.map((item, idx) => (
                   <tr key={idx}>
                     <td>
                       <input
                         type="text"
                         value={item.description ?? ""}
-                        onChange={() => {}}
-                        disabled
+                        onChange={(e) => updateLine(idx, "description", e.target.value)}
                         className="inputCell"
                       />
                     </td>
                     <td>
-                      <input type="text" value={item.hsn_sac ?? ""} disabled className="inputCell" />
+                      <input type="text" value={item.hsn_sac ?? ""} onChange={(e) => updateLine(idx, "hsn_sac", e.target.value)} className="inputCell" />
                     </td>
                     <td>
-                      <input type="text" value={String(item.quantity ?? "")} disabled className="inputCell" />
+                      <input type="number" value={String(item.quantity ?? "")} onChange={(e) => updateLine(idx, "quantity", e.target.value)} className="inputCell" />
                     </td>
                     <td>
-                      <input type="text" value={String(item.unit_price ?? "")} disabled className="inputCell" />
+                      <input type="number" value={String(item.unit_price ?? "")} onChange={(e) => updateLine(idx, "unit_price", e.target.value)} className="inputCell" />
                     </td>
                     <td>
-                      <input type="text" value={String(item.taxable_value ?? "")} disabled className="inputCell" />
+                      <input type="number" value={String(item.taxable_value ?? "")} onChange={(e) => updateLine(idx, "taxable_value", e.target.value)} className="inputCell" />
                     </td>
                     <td>
-                      <input type="text" value={String(item.cgst ?? "")} disabled className="inputCell" />
+                      <input type="number" value={String(item.cgst ?? "")} onChange={(e) => updateLine(idx, "cgst", e.target.value)} className="inputCell" />
                     </td>
                     <td>
-                      <input type="text" value={String(item.sgst ?? "")} disabled className="inputCell" />
+                      <input type="number" value={String(item.sgst ?? "")} onChange={(e) => updateLine(idx, "sgst", e.target.value)} className="inputCell" />
                     </td>
                     <td>
-                      <input type="text" value={String(item.igst ?? "")} disabled className="inputCell" />
+                      <input type="number" value={String(item.igst ?? "")} onChange={(e) => updateLine(idx, "igst", e.target.value)} className="inputCell" />
                     </td>
+                    <td><button className="btnOutline" onClick={() => removeLine(idx)}>Remove</button></td>
                   </tr>
                 ))}
-                {data.line_items.length === 0 && (
-                  <tr><td colSpan={8} className="emptyRow">No line items extracted.</td></tr>
+                {editedLines.length === 0 && (
+                  <tr><td colSpan={9} className="emptyRow">No line items extracted.</td></tr>
                 )}
               </tbody>
             </table>
           </div>
         </section>
       </div>
+      {analysis && (
+        <section className="reviewPanel full" style={{ marginTop: 16 }}>
+          <h3>AI review recommendation <button className="btnOutline" onClick={fetchAnalysis}>Refresh analysis</button></h3>
+          <p><strong>{analysis.recommendation}</strong> · {analysis.risk_level} risk · model confidence {analysis.confidence_score}/100</p>
+          <p>{analysis.executive_summary}</p>
+          {analysis.findings.map((finding, index) => <div key={index} className="infoBox"><strong>{finding.category} · {finding.severity}</strong><p>{finding.description}</p><small>{finding.suggested_action}</small></div>)}
+          <small className="muted">Advisory only · model: {analysis.model_used}</small>
+        </section>
+      )}
+      <button className="btnOutline" onClick={addLine}>+ Add line item</button>
 
       {missingFields.length > 0 && (
         <div className="missingNotice">
@@ -354,50 +380,15 @@ export default function ReviewPage() {
       )}
 
       <div className="reviewFooter">
-        <button className="btnGreen" onClick={handleSaveDraft} disabled={saved}>
+        <button className="btnGreen" onClick={handleSaveDraft}>
           {saved ? "Saved" : "Save draft"}
         </button>
-
-        {!saved && (
-          <button
-            className="btnOutline"
-            onClick={handleSaveDraft}
-            style={{ marginLeft: 8 }}
-          >
-            Save draft
+        {saved && data.invoice_id && (
+          <button className="btnOutline" onClick={handleSubmit} disabled={queueing} style={{ marginLeft: 8 }}>
+            {queueing ? "Queuing…" : "Submit for processing"}
           </button>
         )}
-
-        {saved && conversion.status !== "success" && (
-          <button
-            className="btnGreen"
-            onClick={handleConvert}
-            disabled={conversion.status === "converting"}
-          >
-            {conversion.status === "converting" ? "Converting…" : "Save & Process Invoice"}
-          </button>
-        )}
-
-        {conversion.status === "success" && conversion.invoice_id && (
-          <div className="successCard" style={{ marginLeft: 8, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", border: "1px solid var(--green)", borderRadius: 6, background: "rgba(23, 107, 80, 0.05)" }}>
-            <span className="successIcon">✓</span>
-            <span>Invoice {conversion.invoice_number || conversion.invoice_id?.slice(0, 8)}… created</span>
-            <a
-              href="/invoices"
-              className="btnOutline"
-              style={{ fontSize: 12, padding: "4px 10px" }}
-            >
-              View in All Invoices
-            </a>
-          </div>
-        )}
-
-        {conversion.status === "error" && (
-          <div className="errorCard" style={{ marginLeft: 8, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px" }}>
-            <div className="errorIcon">!</div>
-            <span>{conversion.error}</span>
-          </div>
-        )}
+        <a href="/invoices" className="btnOutline" style={{ marginLeft: 8 }}>View All Invoices</a>
 
         <span className="muted">Extraction method: PyMuPDF (digital text only, no OCR)</span>
       </div>
