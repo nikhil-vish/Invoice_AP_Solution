@@ -9,6 +9,16 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_storage_bucket: str = "invoices"
 
+    # OpenRouter AI extraction
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = ""
+    openrouter_http_referer: str = "http://localhost:3000"
+    openrouter_app_title: str = "Invoice Intelligence Workbench"
+    ai_extraction_enabled: bool = False
+    ai_extraction_timeout_seconds: int = 45
+    ai_extraction_max_retries: int = 1
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

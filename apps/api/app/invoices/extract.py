@@ -1,10 +1,19 @@
+"""Invoice PDF extraction pipeline: PyMuPDF -> AI (optional) -> structured output."""
+
 import re
+import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Optional, Dict, Any, List
 
 import fitz
 
+from app.config import settings
 from app.invoices.fields import HEADER_FIELDS, LINE_FIELDS
+from app.invoices.models import InvoiceExtraction, ExtractionResult, ExtractionField, LineItem
+from app.invoices.ai_extract import extract_with_ai, AIExtractionError
+
+logger = logging.getLogger(__name__)
 
 GSTIN_RE = re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b")
 SKIP_LINE = re.compile(
@@ -33,29 +42,198 @@ class PdfReadError(Exception):
     pass
 
 
-def extract_invoice_pdf(data: bytes) -> dict:
+def extract_invoice_pdf(data: bytes) -> Dict[str, Any]:
+    """
+    Main extraction pipeline:
+    1. Validate PDF
+    2. Extract digital text with PyMuPDF
+    3. Detect scanned pages
+    4. Try AI extraction if enabled (with fallback to regex)
+    5. Return structured result
+    """
     if not data.startswith(b"%PDF-"):
         raise PdfReadError("The file is not a PDF.")
+
     try:
         document = fitz.open(stream=data, filetype="pdf")
     except Exception as exc:
         raise PdfReadError("The PDF could not be opened.") from exc
+
     try:
         if document.needs_pass:
             raise PdfReadError("This PDF is password protected and cannot be read.")
+
         pages = [(page.get_text("text") or "") for page in document]
+        page_count = len(pages)
     finally:
         document.close()
 
     raw_text = "\n".join(pages).strip("\n")
+
+    # Check if PDF has extractable text
     if len(re.sub(r"\s+", "", raw_text)) < 20:
-        return {"kind": "scanned", "raw_text": raw_text, "message": OCR_MESSAGE}
-    parsed = parse_invoice_text(raw_text)
-    parsed["kind"] = "digital"
-    return parsed
+        return {
+            "kind": "scanned",
+            "raw_text": raw_text,
+            "message": OCR_MESSAGE,
+            "fields": {},
+            "field_status": {key: "missing" for key in HEADER_FIELDS},
+            "line_items": [],
+        }
+
+    # Parse with regex-based extractor (baseline)
+    regex_result = parse_invoice_text(raw_text)
+
+    # Try AI extraction if enabled
+    ai_result = None
+    if settings.ai_extraction_enabled:
+        try:
+            import asyncio
+            ai_result = asyncio.run(extract_with_ai(raw_text))
+        except RuntimeError:
+            # Event loop already running (e.g., in tests), skip AI
+            logger.warning("Could not run AI extraction: event loop conflict")
+        except Exception as e:
+            logger.warning(f"AI extraction failed: {e}")
+
+    # Merge results: prefer AI for structured fields, fallback to regex
+    merged = merge_extractions(regex_result, ai_result, raw_text)
+    merged["kind"] = "ai_enhanced" if ai_result and ai_result.extraction else "digital"
+
+    return merged
 
 
-def parse_invoice_text(raw_text: str) -> dict:
+def merge_extractions(
+    regex_result: Dict[str, Any],
+    ai_result: Optional[ExtractionResult],
+    raw_text: str
+) -> Dict[str, Any]:
+    """
+    Merge regex and AI extraction results.
+    AI takes precedence for structured fields; regex is fallback.
+    """
+    if not ai_result or not ai_result.extraction:
+        # No AI result, return regex with proper structure
+        return {
+            "raw_text": raw_text,
+            "fields": regex_result.get("fields", {}),
+            "field_status": regex_result.get("field_status", {}),
+            "line_items": regex_result.get("line_items", []),
+            "message": None,
+        }
+
+    ai_extraction = ai_result.extraction
+
+    # Convert AI extraction to flat fields dict for compatibility
+    ai_fields = _ai_to_flat_fields(ai_extraction)
+    ai_line_items = _ai_to_line_items(ai_extraction)
+
+    # Merge: use AI where available (FOUND), fallback to regex
+    merged_fields = {}
+    merged_field_status = {}
+
+    for key in HEADER_FIELDS:
+        ai_field = _get_ai_field(ai_extraction, key)
+        regex_value = regex_result.get("fields", {}).get(key)
+
+        if ai_field and ai_field.status == "FOUND" and ai_field.value:
+            merged_fields[key] = ai_field.normalized_value or ai_field.value
+            merged_field_status[key] = "found"
+        elif regex_value is not None:
+            merged_fields[key] = regex_value
+            merged_field_status[key] = "found"
+        else:
+            merged_fields[key] = None
+            merged_field_status[key] = "missing"
+
+    # Merge line items
+    merged_line_items = ai_line_items if ai_line_items else regex_result.get("line_items", [])
+
+    return {
+        "raw_text": raw_text,
+        "fields": merged_fields,
+        "field_status": merged_field_status,
+        "line_items": merged_line_items,
+        "message": None,
+    }
+
+
+def _ai_to_flat_fields(extraction: InvoiceExtraction) -> Dict[str, Optional[str]]:
+    """Convert AI extraction nested structure to flat fields dict."""
+    return {
+        "supplier_legal_name": extraction.supplier.legal_name.normalized_value or extraction.supplier.legal_name.value,
+        "supplier_gstin": extraction.supplier.gstin.normalized_value or extraction.supplier.gstin.value,
+        "supplier_address": extraction.supplier.address.normalized_value or extraction.supplier.address.value,
+        "invoice_number": extraction.invoice_number.normalized_value or extraction.invoice_number.value,
+        "invoice_date": extraction.invoice_date.normalized_value or extraction.invoice_date.value,
+        "due_date": extraction.payment.due_date.normalized_value or extraction.payment.due_date.value,
+        "buyer_legal_name": extraction.buyer.legal_name.normalized_value or extraction.buyer.legal_name.value,
+        "buyer_gstin": extraction.buyer.gstin.normalized_value or extraction.buyer.gstin.value,
+        "po_number": extraction.commercial.po_number.normalized_value or extraction.commercial.po_number.value,
+        "taxable_value": extraction.amounts.taxable_value.normalized_value or extraction.amounts.taxable_value.value,
+        "cgst": extraction.amounts.cgst.normalized_value or extraction.amounts.cgst.value,
+        "sgst": extraction.amounts.sgst.normalized_value or extraction.amounts.sgst.value,
+        "igst": extraction.amounts.igst.normalized_value or extraction.amounts.igst.value,
+        "total_tax": extraction.amounts.total_tax.normalized_value or extraction.amounts.total_tax.value,
+        "invoice_grand_total": extraction.amounts.grand_total.normalized_value or extraction.amounts.grand_total.value,
+        "currency": extraction.commercial.currency.normalized_value or extraction.commercial.currency.value,
+    }
+
+
+def _get_ai_field(extraction: InvoiceExtraction, key: str) -> Optional[ExtractionField]:
+    """Get an ExtractionField from AI extraction by flat key."""
+    field_map = {
+        "supplier_legal_name": extraction.supplier.legal_name,
+        "supplier_gstin": extraction.supplier.gstin,
+        "supplier_address": extraction.supplier.address,
+        "invoice_number": extraction.invoice_number,
+        "invoice_date": extraction.invoice_date,
+        "due_date": extraction.payment.due_date,
+        "buyer_legal_name": extraction.buyer.legal_name,
+        "buyer_gstin": extraction.buyer.gstin,
+        "po_number": extraction.commercial.po_number,
+        "taxable_value": extraction.amounts.taxable_value,
+        "cgst": extraction.amounts.cgst,
+        "sgst": extraction.amounts.sgst,
+        "igst": extraction.amounts.igst,
+        "total_tax": extraction.amounts.total_tax,
+        "invoice_grand_total": extraction.amounts.grand_total,
+        "currency": extraction.commercial.currency,
+    }
+    return field_map.get(key)
+
+
+def _ai_to_line_items(extraction: InvoiceExtraction) -> List[Dict[str, Any]]:
+    """Convert AI line items to legacy format."""
+    items = []
+    for item in extraction.line_items:
+        items.append({
+            "description": item.description.normalized_value or item.description.value,
+            "hsn_sac": item.hsn_sac.normalized_value or item.hsn_sac.value,
+            "quantity": _parse_number(item.quantity.normalized_value or item.quantity.value),
+            "unit_price": _parse_number(item.unit_price.normalized_value or item.unit_price.value),
+            "taxable_value": _parse_number(item.taxable_value.normalized_value or item.taxable_value.value),
+            "cgst": _parse_number(item.tax_amount.normalized_value or item.tax_amount.value) if item.tax_amount.value else None,
+            "sgst": None,
+            "igst": None,
+        })
+    for item in items:
+        for key in LINE_FIELDS:
+            item.setdefault(key, None)
+    return items
+
+
+def _parse_number(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return float(value.replace(",", ""))
+    except (ValueError, AttributeError):
+        return None
+
+
+def parse_invoice_text(raw_text: str) -> Dict[str, Any]:
+    """Regex-based invoice text parsing (baseline extractor)."""
     supplier_text, buyer_text = _split_parties(raw_text)
     supplier_name, supplier_gstin, supplier_address = _party(supplier_text)
     buyer_name, buyer_gstin, _buyer_address = _party(buyer_text) if buyer_text else (None, None, None)
@@ -95,7 +273,7 @@ def parse_invoice_text(raw_text: str) -> dict:
     }
 
 
-def field_status(fields: dict) -> dict:
+def field_status(fields: Dict[str, Any]) -> Dict[str, str]:
     return {key: "missing" if fields.get(key) is None else "found" for key in HEADER_FIELDS}
 
 
@@ -106,7 +284,7 @@ def _split_parties(text: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _party(text: str) -> tuple[str | None, str | None, str | None]:
+def _party(text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     gstin = None
     gstin_at = None
@@ -128,7 +306,7 @@ def _party(text: str) -> tuple[str | None, str | None, str | None]:
         if not labeled:
             continue
         parts = [labeled.group(1).strip()] if labeled.group(1).strip() else []
-        for follower in lines[index + 1 :]:
+        for follower in lines[index + 1:]:
             if GSTIN_RE.search(follower.upper()) or re.match(r"(?i)^(invoice|bill to|gstin)\b", follower):
                 break
             parts.append(follower)
@@ -141,25 +319,25 @@ def _party(text: str) -> tuple[str | None, str | None, str | None]:
     return name, gstin, address
 
 
-def _find_token(text: str, pattern: str) -> str | None:
+def _find_token(text: str, pattern: str) -> Optional[str]:
     match = re.search(pattern, text, re.IGNORECASE)
     if not match:
         return None
     return match.group(1).strip() or None
 
 
-def _find_date(text: str, label: str) -> str | None:
+def _find_date(text: str, label: str) -> Optional[str]:
     for line in text.splitlines():
         match = re.search(label, line, re.IGNORECASE)
         if not match:
             continue
-        found = re.search(r"\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}", line[match.end() :])
+        found = re.search(r"\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}", line[match.end():])
         if found:
             return _iso_date(found.group(0))
     return None
 
 
-def _iso_date(value: str) -> str | None:
+def _iso_date(value: str) -> Optional[str]:
     match = re.match(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$", value.strip())
     if not match:
         return None
@@ -174,19 +352,19 @@ def _iso_date(value: str) -> str | None:
         return None
 
 
-def _find_amount(text: str, label: str):
+def _find_amount(text: str, label: str) -> Optional[float]:
     for line in text.splitlines():
         match = re.search(label, line, re.IGNORECASE)
         if not match:
             continue
-        rest = re.sub(r"\d+(?:\.\d+)?\s*%", " ", line[match.end() :])
+        rest = re.sub(r"\d+(?:\.\d+)?\s*%", " ", line[match.end():])
         numbers = AMOUNT_RE.findall(rest)
         if numbers:
             return _number(numbers[-1])
     return None
 
 
-def _find_total(text: str):
+def _find_total(text: str) -> Optional[float]:
     for label in (r"\bgrand\s+total\b", r"\bamount\s+payable\b", r"\binvoice\s+total\b", r"\bnet\s+payable\b"):
         amount = _find_amount(text, label)
         if amount is not None:
@@ -194,7 +372,7 @@ def _find_total(text: str):
     return None
 
 
-def _find_currency(text: str) -> str | None:
+def _find_currency(text: str) -> Optional[str]:
     match = re.search(r"\bcurrency\s*[:\-]?\s*([A-Z]{3})\b", text, re.IGNORECASE)
     if match:
         return match.group(1).upper()
@@ -203,7 +381,7 @@ def _find_currency(text: str) -> str | None:
     return None
 
 
-def _line_items(text: str) -> list[dict]:
+def _line_items(text: str) -> List[Dict[str, Any]]:
     items = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -213,25 +391,23 @@ def _line_items(text: str) -> list[dict]:
         description = match.group("desc").strip(" |-")
         if not re.search(r"[A-Za-z]", description):
             continue
-        items.append(
-            {
-                "description": description,
-                "hsn_sac": match.group("hsn"),
-                "quantity": _number(match.group("qty")),
-                "unit_price": _number(match.group("rate")),
-                "taxable_value": _number(match.group("taxable")),
-                "cgst": None,
-                "sgst": None,
-                "igst": None,
-            }
-        )
+        items.append({
+            "description": description,
+            "hsn_sac": match.group("hsn"),
+            "quantity": _number(match.group("qty")),
+            "unit_price": _number(match.group("rate")),
+            "taxable_value": _number(match.group("taxable")),
+            "cgst": None,
+            "sgst": None,
+            "igst": None,
+        })
     for item in items:
         for key in LINE_FIELDS:
             item.setdefault(key, None)
     return items
 
 
-def _number(value: str):
+def _number(value: str) -> Optional[float]:
     try:
         amount = Decimal(value.replace(",", ""))
     except (InvalidOperation, AttributeError):

@@ -1,19 +1,49 @@
-"""Invoice intake API routes.
+"""Invoice API routes.
 
-POST /api/v1/invoices/upload — multipart/form-data PDF upload.
+Endpoints:
+- POST /api/v1/invoices/upload — multipart/form-data PDF upload
+- GET /api/v1/invoices — list/filter/paginate invoices
+- GET /api/v1/invoices/{invoice_id} — invoice detail with items, documents, runs
+- POST /api/v1/invoices/{invoice_id}/process — start/retry processing idempotently
+- GET /api/v1/invoices/runs — list processing runs
+- GET /api/v1/invoices/runs/{run_id} — processing run detail with stage events
+- GET /api/v1/invoices/suppliers — list suppliers
+- GET /api/v1/invoices/approvals — list approval tasks
+- GET /api/v1/invoices/approvals/{approval_id} — approval detail
+- GET /api/v1/invoices/exceptions — list exceptions
+- GET /api/v1/invoices/exceptions/{exception_id} — exception detail
+- GET /api/v1/invoices/drafts/{draft_id} — retrieve intake draft
+- POST /api/v1/invoices/drafts/{draft_id}/save — save edited draft
 """
 
 import hashlib
 import uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Path
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, Path, Query
 
 from app.invoices.extract import extract_invoice_pdf, PdfReadError
 from app.invoices.fields import MAX_UPLOAD_BYTES
-from app.invoices.records import extraction_summary
+from app.invoices.records import extraction_summary, invoice_columns, line_columns
 from app.invoices.storage import upload_pdf, StorageError
 from app.invoices.repository import (
     find_draft_by_sha256,
     insert_intake_draft,
+    list_invoices,
+    get_invoice,
+    insert_invoice,
+    insert_invoice_items,
+    insert_invoice_document,
+    update_invoice_status,
+    list_processing_runs,
+    get_processing_run,
+    insert_processing_run,
+    update_processing_run,
+    insert_validation_result,
+    list_suppliers,
+    list_approvals,
+    get_approval,
+    list_exceptions,
+    get_exception,
     RepositoryError,
 )
 from app.config import settings
@@ -22,6 +52,9 @@ from supabase import create_client
 router = APIRouter(prefix="/api/v1/invoices", tags=["invoices"])
 
 ALLOWED_CONTENT_TYPES = {"application/pdf"}
+
+# Development default client ID (replace with auth context in production)
+DEFAULT_CLIENT_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def _sha256(data: bytes) -> str:
@@ -35,9 +68,204 @@ def _validate_uuid(value: str) -> None:
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid draft ID format.",
+            detail="Invalid ID format.",
         )
 
+
+def _get_client():
+    """Get Supabase client with service role."""
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+        )
+    return create_client(settings.supabase_url, settings.supabase_service_role_key)
+
+
+# ==================== Sub-routers (must be included first for route priority) ====================
+
+# Processing Runs sub-router
+runs_router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+@runs_router.get("")
+async def list_runs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """List processing runs with pagination."""
+    client = _get_client()
+    try:
+        result = list_processing_runs(
+            client,
+            client_id=DEFAULT_CLIENT_ID,
+            page=page,
+            page_size=page_size,
+        )
+        return result
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
+@runs_router.get("/{run_id}")
+async def get_run(run_id: str = Path(...)):
+    """Get processing run detail with stage events."""
+    _validate_uuid(run_id)
+    client = _get_client()
+    try:
+        run = get_processing_run(client, run_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Processing run not found.",
+        )
+    return run
+
+
+# Suppliers sub-router
+suppliers_router = APIRouter(prefix="/suppliers", tags=["suppliers"])
+
+
+@suppliers_router.get("")
+async def list_suppliers_endpoint(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+):
+    """List suppliers with pagination and filtering."""
+    client = _get_client()
+    try:
+        result = list_suppliers(
+            client,
+            client_id=DEFAULT_CLIENT_ID,
+            page=page,
+            page_size=page_size,
+            search=search,
+            status=status_filter,
+        )
+        return result
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
+# Approvals sub-router
+approvals_router = APIRouter(prefix="/approvals", tags=["approvals"])
+
+
+@approvals_router.get("")
+async def list_approvals_endpoint(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    status_filter: Optional[str] = Query(None, alias="status"),
+):
+    """List approval tasks with pagination and filtering."""
+    client = _get_client()
+    try:
+        result = list_approvals(
+            client,
+            client_id=DEFAULT_CLIENT_ID,
+            page=page,
+            page_size=page_size,
+            status=status_filter,
+        )
+        return result
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
+@approvals_router.get("/{approval_id}")
+async def get_approval_endpoint(approval_id: str = Path(...)):
+    """Get approval detail."""
+    _validate_uuid(approval_id)
+    client = _get_client()
+    try:
+        approval = get_approval(client, approval_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not approval:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Approval not found.",
+        )
+    return approval
+
+
+# Exceptions sub-router
+exceptions_router = APIRouter(prefix="/exceptions", tags=["exceptions"])
+
+
+@exceptions_router.get("")
+async def list_exceptions_endpoint(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    severity_filter: Optional[str] = Query(None, alias="severity"),
+    status_filter: Optional[str] = Query(None, alias="status"),
+):
+    """List exceptions with pagination and filtering."""
+    client = _get_client()
+    try:
+        result = list_exceptions(
+            client,
+            client_id=DEFAULT_CLIENT_ID,
+            page=page,
+            page_size=page_size,
+            severity=severity_filter,
+            status=status_filter,
+        )
+        return result
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
+@exceptions_router.get("/{exception_id}")
+async def get_exception_endpoint(exception_id: str = Path(...)):
+    """Get exception detail."""
+    _validate_uuid(exception_id)
+    client = _get_client()
+    try:
+        exception = get_exception(client, exception_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not exception:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Exception not found.",
+        )
+    return exception
+
+
+# Include sub-routers FIRST so their routes have priority over catch-all routes
+router.include_router(runs_router)
+router.include_router(suppliers_router)
+router.include_router(approvals_router)
+router.include_router(exceptions_router)
+
+
+# ==================== Main Invoice Routes ====================
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_invoice(file: UploadFile = File(...)):
@@ -69,16 +297,10 @@ async def upload_invoice(file: UploadFile = File(...)):
 
     sha256 = _sha256(data)
 
-    if not settings.supabase_url or not settings.supabase_service_role_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
-        )
-
+    client = _get_client()
     storage_bucket = getattr(settings, "supabase_storage_bucket", None) or "invoices"
     storage_path = f"intake/{sha256}/{file.filename or 'invoice.pdf'}"
 
-    client = create_client(settings.supabase_url, settings.supabase_service_role_key)
     try:
         existing = find_draft_by_sha256(client, sha256)
     except RepositoryError as exc:
@@ -166,16 +388,113 @@ async def upload_invoice(file: UploadFile = File(...)):
     return response
 
 
+@router.get("")
+async def list_invoices_endpoint(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+):
+    """List invoices with pagination and filtering."""
+    client = _get_client()
+    try:
+        result = list_invoices(
+            client,
+            client_id=DEFAULT_CLIENT_ID,
+            page=page,
+            page_size=page_size,
+            search=search,
+            status=status_filter,
+        )
+        return result
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
+@router.get("/{invoice_id}")
+async def get_invoice_endpoint(invoice_id: str = Path(...)):
+    """Get invoice detail with line items and documents."""
+    _validate_uuid(invoice_id)
+    client = _get_client()
+    try:
+        invoice = get_invoice(client, invoice_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {exc}",
+        )
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found.",
+        )
+    return invoice
+
+
+@router.post("/{invoice_id}/process")
+async def process_invoice(invoice_id: str = Path(...)):
+    """Start or retry invoice processing idempotently."""
+    _validate_uuid(invoice_id)
+    client = _get_client()
+    
+    # Check invoice exists
+    invoice = get_invoice(client, invoice_id)
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found.",
+        )
+    
+    # Check if there's already a running/queued run
+    runs_result = client.table("processing_runs").select("*").eq("invoice_id", invoice_id).eq("status", "QUEUED").execute()
+    if runs_result.data:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Processing already queued for this invoice.",
+        )
+    
+    runs_result = client.table("processing_runs").select("*").eq("invoice_id", invoice_id).eq("status", "RUNNING").execute()
+    if runs_result.data:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Processing already running for this invoice.",
+        )
+    
+    # Create new processing run
+    run_number = 1
+    existing_runs = client.table("processing_runs").select("run_number").eq("invoice_id", invoice_id).order("run_number", desc=True).limit(1).execute()
+    if existing_runs.data:
+        run_number = existing_runs.data[0]["run_number"] + 1
+    
+    run_payload = {
+        "invoice_id": invoice_id,
+        "run_number": run_number,
+        "status": "QUEUED",
+        "triggered_by": "MANUAL_RETRY" if run_number > 1 else "MANUAL_UPLOAD",
+    }
+    
+    try:
+        run = insert_processing_run(client, run_payload)
+    except RepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not create processing run: {exc}",
+        )
+    
+    # Update invoice status
+    update_invoice_status(client, invoice_id, "EXTRACTING")
+    
+    return {"run_id": run["id"], "run_number": run_number, "status": "QUEUED"}
+
+
 @router.get("/drafts/{draft_id}")
 async def get_draft(draft_id: str = Path(...)):
     """Retrieve an intake draft by ID."""
     _validate_uuid(draft_id)
-    if not settings.supabase_url or not settings.supabase_service_role_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Supabase is not configured.",
-        )
-    client = create_client(settings.supabase_url, settings.supabase_service_role_key)
+    client = _get_client()
     try:
         result = client.table("invoice_intake_drafts").select("*").eq("id", draft_id).execute()
     except Exception as exc:
@@ -212,12 +531,7 @@ async def get_draft(draft_id: str = Path(...)):
 async def save_draft(draft_id: str = Path(...)):
     """Save edited draft data (placeholder for future persistence)."""
     _validate_uuid(draft_id)
-    if not settings.supabase_url or not settings.supabase_service_role_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Supabase is not configured.",
-        )
-    client = create_client(settings.supabase_url, settings.supabase_service_role_key)
+    client = _get_client()
     try:
         result = client.table("invoice_intake_drafts").select("*").eq("id", draft_id).execute()
     except Exception as exc:

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
+import { Shell } from "@/components/Shell";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
@@ -142,218 +143,173 @@ export default function ReviewPage() {
 
   if (loading) {
     return (
-      <main className="shell">
-        <aside className="sidebar">
-          <div className="brand">
-            <div className="brandMark">I</div>
-            <div><strong>Invoice Intelligence</strong><span>AP WORKSPACE</span></div>
-          </div>
-          <div className="navLabel">WORKSPACE</div>
-          <a className="navItem" href="/">▦ <span>Overview</span></a>
-          <a className="navItem" href="/invoices">▤ <span>All invoices</span></a>
-          <a className="navItem active">⌁ <span>Live processing</span></a>
-          <a className="navItem">⚑ <span>Exception centre</span></a>
-          <a className="navItem">✓ <span>Approvals</span></a>
-          <div className="navLabel second">CONFIGURATION</div>
-          <a className="navItem">▣ <span>Suppliers</span></a>
-          <a className="navItem">⚙ <span>Settings</span></a>
-          <div className="sidebarFoot">Development workspace<br/><span>Local environment</span></div>
-        </aside>
-        <section className="content">
-          <header className="topbar">
-            <div><div className="eyebrow">ACCOUNTS PAYABLE / REVIEW</div><h1>Review Invoice</h1></div>
-          </header>
-          <div className="emptyState"><div className="emptyIcon">↻</div><strong>Loading…</strong></div>
-        </section>
-      </main>
-    );
-  }
-
-  if (error || !data) {
-    return (
-      <main className="shell">
-        <aside className="sidebar">
-          <div className="brand">
-            <div className="brandMark">I</div>
-            <div><strong>Invoice Intelligence</strong><span>AP WORKSPACE</span></div>
-          </div>
-          <div className="navLabel">WORKSPACE</div>
-          <a className="navItem" href="/">▦ <span>Overview</span></a>
-          <a className="navItem" href="/invoices">▤ <span>All invoices</span></a>
-          <a className="navItem active">⌁ <span>Live processing</span></a>
-          <a className="navItem">⚑ <span>Exception centre</span></a>
-          <a className="navItem">✓ <span>Approvals</span></a>
-          <div className="navLabel second">CONFIGURATION</div>
-          <a className="navItem">▣ <span>Suppliers</span></a>
-          <a className="navItem">⚙ <span>Settings</span></a>
-          <div className="sidebarFoot">Development workspace<br/><span>Local environment</span></div>
-        </aside>
-        <section className="content">
-          <header className="topbar">
-            <div><div className="eyebrow">ACCOUNTS PAYABLE / REVIEW</div><h1>Review Invoice</h1></div>
-          </header>
-          <div className="errorCard">
-            <div className="errorIcon">!</div>
-            <strong>Could not load draft</strong>
-            <p>{error || "Draft not found."}</p>
-            <button className="btnGreen" onClick={() => { window.location.href = "/upload"; }}>
-              Upload another
-            </button>
-          </div>
-        </section>
-      </main>
-    );
-  }
-
-  return (
-    <main className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brandMark">I</div>
-          <div><strong>Invoice Intelligence</strong><span>AP WORKSPACE</span></div>
-        </div>
-        <div className="navLabel">WORKSPACE</div>
-        <a className="navItem" href="/">▦ <span>Overview</span></a>
-        <a className="navItem" href="/invoices">▤ <span>All invoices</span></a>
-        <a className="navItem active">⌁ <span>Live processing</span></a>
-        <a className="navItem">⚑ <span>Exception centre</span></a>
-        <a className="navItem">✓ <span>Approvals</span></a>
-        <div className="navLabel second">CONFIGURATION</div>
-        <a className="navItem">▣ <span>Suppliers</span></a>
-        <a className="navItem">⚙ <span>Settings</span></a>
-        <div className="sidebarFoot">Development workspace<br/><span>Local environment</span></div>
-      </aside>
-      <section className="content">
+      <Shell>
         <header className="topbar">
           <div>
             <div className="eyebrow">ACCOUNTS PAYABLE / REVIEW</div>
             <h1>Review Invoice</h1>
           </div>
-          <a className="btnOutline" href="/upload">← Upload another</a>
         </header>
-
-        <div className="reviewHeader">
-          <div className="docInfo">
-            <div className="docBadge">{data.extraction_kind === "scanned" ? "SCANNED" : "DIGITAL"}</div>
-            <strong>{data.filename}</strong>
-            <span className="muted">{Math.round(data.file_size_bytes / 1024)} KB · SHA-256: {data.sha256.slice(0, 16)}…</span>
-          </div>
-          <div className="statusBadge">
-            {data.extraction_kind === "scanned" ? (
-              <span className="statusScanned">No extractable text · OCR not implemented</span>
-            ) : (
-              <span className="statusDigital">Digital text extracted</span>
-            )}
-          </div>
+        <div className="emptyState">
+          <div className="emptyIcon">↻</div>
+          <strong>Loading…</strong>
         </div>
+      </Shell>
+    );
+  }
 
-        {data.message && (
-          <div className="infoBox">
-            <div className="infoIcon">!</div>
-            <p>{data.message}</p>
+  if (error || !data) {
+    return (
+      <Shell>
+        <header className="topbar">
+          <div>
+            <div className="eyebrow">ACCOUNTS PAYABLE / REVIEW</div>
+            <h1>Review Invoice</h1>
           </div>
-        )}
-
-        <div className="reviewGrid">
-          <section className="reviewPanel">
-            <h3>Invoice details</h3>
-            <div className="fieldList">
-              {Object.entries(HEADER_LABELS).map(([key, label]) => {
-                const field = editedFields[key];
-                const val = field ? field.value : data.fields[key];
-                const status = field ? field.status : data.field_status?.[key];
-                const isMissing = status === "missing";
-                return (
-                  <div key={key} className="fieldRow">
-                    <label>{label}</label>
-                    <input
-                      type="text"
-                      value={val ?? ""}
-                      onChange={(e) => updateField(key, e.target.value)}
-                      disabled={data.extraction_kind === "scanned"}
-                      className={isMissing ? "inputMissing" : "inputField"}
-                      placeholder={isMissing ? "Not extracted" : undefined}
-                    />
-                    {isMissing && <span className="missingTag">Missing</span>}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="reviewPanel full">
-            <h3>Line items</h3>
-            <div className="tableWrap">
-              <table className="dataTable">
-                <thead>
-                  <tr>
-                    <th>Description</th>
-                    <th>HSN/SAC</th>
-                    <th>Qty</th>
-                    <th>Unit price</th>
-                    <th>Taxable value</th>
-                    <th>CGST</th>
-                    <th>SGST</th>
-                    <th>IGST</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.line_items.map((item, idx) => (
-                    <tr key={idx}>
-                      <td>
-                        <input
-                          type="text"
-                          value={item.description ?? ""}
-                          onChange={() => {}}
-                          disabled
-                          className="inputCell"
-                        />
-                      </td>
-                      <td>
-                        <input type="text" value={item.hsn_sac ?? ""} disabled className="inputCell" />
-                      </td>
-                      <td>
-                        <input type="text" value={String(item.quantity ?? "")} disabled className="inputCell" />
-                      </td>
-                      <td>
-                        <input type="text" value={String(item.unit_price ?? "")} disabled className="inputCell" />
-                      </td>
-                      <td>
-                        <input type="text" value={String(item.taxable_value ?? "")} disabled className="inputCell" />
-                      </td>
-                      <td>
-                        <input type="text" value={String(item.cgst ?? "")} disabled className="inputCell" />
-                      </td>
-                      <td>
-                        <input type="text" value={String(item.sgst ?? "")} disabled className="inputCell" />
-                      </td>
-                      <td>
-                        <input type="text" value={String(item.igst ?? "")} disabled className="inputCell" />
-                      </td>
-                    </tr>
-                  ))}
-                  {data.line_items.length === 0 && (
-                    <tr><td colSpan={8} className="emptyRow">No line items extracted.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-
-        {missingFields.length > 0 && (
-          <div className="missingNotice">
-            <span className="missingDot"/> Missing: {missingFields.map((k) => HEADER_LABELS[k] || k).join(", ")}
-          </div>
-        )}
-
-        <div className="reviewFooter">
-          <button className="btnGreen" onClick={handleSaveDraft} disabled={saved}>
-            {saved ? "Saved" : "Save draft"}
+        </header>
+        <div className="errorCard">
+          <div className="errorIcon">!</div>
+          <strong>Could not load draft</strong>
+          <p>{error || "Draft not found."}</p>
+          <button className="btnGreen" onClick={() => { window.location.href = "/upload"; }}>
+            Upload another
           </button>
-          <span className="muted">Extraction method: PyMuPDF (digital text only, no OCR)</span>
         </div>
-      </section>
-    </main>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell>
+      <header className="topbar">
+        <div>
+          <div className="eyebrow">ACCOUNTS PAYABLE / REVIEW</div>
+          <h1>Review Invoice</h1>
+        </div>
+        <a className="btnOutline" href="/upload">← Upload another</a>
+      </header>
+
+      <div className="reviewHeader">
+        <div className="docInfo">
+          <div className="docBadge">{data.extraction_kind === "scanned" ? "SCANNED" : "DIGITAL"}</div>
+          <strong>{data.filename}</strong>
+          <span className="muted">{Math.round(data.file_size_bytes / 1024)} KB · SHA-256: {data.sha256.slice(0, 16)}…</span>
+        </div>
+        <div className="statusBadge">
+          {data.extraction_kind === "scanned" ? (
+            <span className="statusScanned">No extractable text · OCR not implemented</span>
+          ) : (
+            <span className="statusDigital">Digital text extracted</span>
+          )}
+        </div>
+      </div>
+
+      {data.message && (
+        <div className="infoBox">
+          <div className="infoIcon">!</div>
+          <p>{data.message}</p>
+        </div>
+      )}
+
+      <div className="reviewGrid">
+        <section className="reviewPanel">
+          <h3>Invoice details</h3>
+          <div className="fieldList">
+            {Object.entries(HEADER_LABELS).map(([key, label]) => {
+              const field = editedFields[key];
+              const val = field ? field.value : data.fields[key];
+              const status = field ? field.status : data.field_status?.[key];
+              const isMissing = status === "missing";
+              return (
+                <div key={key} className="fieldRow">
+                  <label>{label}</label>
+                  <input
+                    type="text"
+                    value={val ?? ""}
+                    onChange={(e) => updateField(key, e.target.value)}
+                    disabled={data.extraction_kind === "scanned"}
+                    className={isMissing ? "inputMissing" : "inputField"}
+                    placeholder={isMissing ? "Not extracted" : undefined}
+                  />
+                  {isMissing && <span className="missingTag">Missing</span>}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="reviewPanel full">
+          <h3>Line items</h3>
+          <div className="tableWrap">
+            <table className="dataTable">
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th>HSN/SAC</th>
+                  <th>Qty</th>
+                  <th>Unit price</th>
+                  <th>Taxable value</th>
+                  <th>CGST</th>
+                  <th>SGST</th>
+                  <th>IGST</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.line_items.map((item, idx) => (
+                  <tr key={idx}>
+                    <td>
+                      <input
+                        type="text"
+                        value={item.description ?? ""}
+                        onChange={() => {}}
+                        disabled
+                        className="inputCell"
+                      />
+                    </td>
+                    <td>
+                      <input type="text" value={item.hsn_sac ?? ""} disabled className="inputCell" />
+                    </td>
+                    <td>
+                      <input type="text" value={String(item.quantity ?? "")} disabled className="inputCell" />
+                    </td>
+                    <td>
+                      <input type="text" value={String(item.unit_price ?? "")} disabled className="inputCell" />
+                    </td>
+                    <td>
+                      <input type="text" value={String(item.taxable_value ?? "")} disabled className="inputCell" />
+                    </td>
+                    <td>
+                      <input type="text" value={String(item.cgst ?? "")} disabled className="inputCell" />
+                    </td>
+                    <td>
+                      <input type="text" value={String(item.sgst ?? "")} disabled className="inputCell" />
+                    </td>
+                    <td>
+                      <input type="text" value={String(item.igst ?? "")} disabled className="inputCell" />
+                    </td>
+                  </tr>
+                ))}
+                {data.line_items.length === 0 && (
+                  <tr><td colSpan={8} className="emptyRow">No line items extracted.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      {missingFields.length > 0 && (
+        <div className="missingNotice">
+          <span className="missingDot"/> Missing: {missingFields.map((k) => HEADER_LABELS[k] || k).join(", ")}
+        </div>
+      )}
+
+      <div className="reviewFooter">
+        <button className="btnGreen" onClick={handleSaveDraft} disabled={saved}>
+          {saved ? "Saved" : "Save draft"}
+        </button>
+        <span className="muted">Extraction method: PyMuPDF (digital text only, no OCR)</span>
+      </div>
+    </Shell>
   );
 }

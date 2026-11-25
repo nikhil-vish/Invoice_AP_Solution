@@ -1,10 +1,9 @@
-
 "use client";
 
 import { useState, useCallback, useRef } from "react";
+import { Shell } from "@/components/Shell";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
 const MAX_FILE_SIZE = 15 * 1024 * 1024;
 
@@ -164,166 +163,121 @@ export default function UploadPage() {
   };
 
   return (
-    <main className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brandMark">I</div>
-          <div>
-            <strong>Invoice Intelligence</strong>
-            <span>AP WORKSPACE</span>
-          </div>
+    <Shell>
+      <header className="topbar">
+        <div>
+          <div className="eyebrow">ACCOUNTS PAYABLE / INTAKE</div>
+          <h1>Upload Invoice</h1>
         </div>
 
-        <div className="navLabel">WORKSPACE</div>
-
-        <a className="navItem" href="/">
-          ▦ <span>Overview</span>
-        </a>
-        <a className="navItem" href="/invoices">
-          ▤ <span>All invoices</span>
-        </a>
-        <a className="navItem active">
-          ⌁ <span>Live processing</span>
-        </a>
-        <a className="navItem">
-          ⚑ <span>Exception centre</span>
-        </a>
-        <a className="navItem">
-          ✓ <span>Approvals</span>
-        </a>
-
-        <div className="navLabel second">CONFIGURATION</div>
-
-        <a className="navItem">
-          ▣ <span>Suppliers</span>
-        </a>
-        <a className="navItem">
-          ⚙ <span>Settings</span>
-        </a>
-
-        <div className="sidebarFoot">
-          Development workspace
-          <br />
-          <span>Local environment</span>
+        <div className="userPill">
+          <span className="dot" /> Development mode
         </div>
-      </aside>
+      </header>
 
-      <section className="content">
-        <header className="topbar">
-          <div>
-            <div className="eyebrow">ACCOUNTS PAYABLE / INTAKE</div>
-            <h1>Upload Invoice</h1>
-          </div>
+      {state === "success" && response && reviewUrl ? (
+        <div className="successCard">
+          <div className="successIcon">✓</div>
+          <strong>Upload complete</strong>
 
-          <div className="userPill">
-            <span className="dot" /> Development mode
-          </div>
-        </header>
+          <p>
+            {response.filename} (
+            {Math.round(response.file_size_bytes / 1024)} KB)
+          </p>
 
-        {state === "success" && response && reviewUrl ? (
-          <div className="successCard">
-            <div className="successIcon">✓</div>
-            <strong>Upload complete</strong>
+          <p className="muted">
+            {response.message || "Text extraction completed."}
+          </p>
 
-            <p>
-              {response.filename} (
-              {Math.round(response.file_size_bytes / 1024)} KB)
+          <button
+            className="btnGreen"
+            onClick={() => {
+              window.location.href = reviewUrl;
+            }}
+          >
+            Review extracted data
+          </button>
+
+          <button className="btnOutline" onClick={reset}>
+            Upload another
+          </button>
+        </div>
+      ) : state === "error" && error ? (
+        <div className="errorCard">
+          <div className="errorIcon">!</div>
+          <strong>Upload failed</strong>
+          <p>{error}</p>
+
+          {file && (
+            <button className="btnGreen" onClick={handleRetry}>
+              Try again
+            </button>
+          )}
+
+          <button className="btnOutline" onClick={reset}>
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div className="uploadZone">
+          <div
+            className="dropArea"
+            onDragOver={handleDragOver}
+            onDrop={handleDropEvent}
+            onClick={() => {
+              const input = document.getElementById(
+                "file-input"
+              ) as HTMLInputElement | null;
+
+              input?.click();
+            }}
+          >
+            <div className="dropIcon">▤</div>
+
+            <p className="dropHint">
+              Drag & drop a PDF invoice here
             </p>
 
-            <p className="muted">
-              {response.message || "Text extraction completed."}
-            </p>
+            <p className="dropLimit">PDF only · Max 15 MB</p>
 
-            <button
-              className="btnGreen"
-              onClick={() => {
-                window.location.href = reviewUrl;
-              }}
-            >
-              Review extracted data
-            </button>
-
-            <button className="btnOutline" onClick={reset}>
-              Upload another
-            </button>
-          </div>
-        ) : state === "error" && error ? (
-          <div className="errorCard">
-            <div className="errorIcon">!</div>
-            <strong>Upload failed</strong>
-            <p>{error}</p>
+            <input
+              id="file-input"
+              type="file"
+              accept="application/pdf"
+              style={{ display: "none" }}
+              onChange={handleFileSelect}
+            />
 
             {file && (
-              <button className="btnGreen" onClick={handleRetry}>
-                Try again
-              </button>
-            )}
-
-            <button className="btnOutline" onClick={reset}>
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <div className="uploadZone">
-            <div
-              className="dropArea"
-              onDragOver={handleDragOver}
-              onDrop={handleDropEvent}
-              onClick={() => {
-                const input = document.getElementById(
-                  "file-input"
-                ) as HTMLInputElement | null;
-
-                input?.click();
-              }}
-            >
-              <div className="dropIcon">▤</div>
-
-              <p className="dropHint">
-                Drag &amp; drop a PDF invoice here
-              </p>
-
-              <p className="dropLimit">PDF only · Max 15 MB</p>
-
-              <input
-                id="file-input"
-                type="file"
-                accept="application/pdf"
-                style={{ display: "none" }}
-                onChange={handleFileSelect}
-              />
-
-              {file && (
-                <div className="selectedFile">
-                  <strong>{file.name}</strong>
-                  <span>
-                    ({Math.round(file.size / 1024)} KB)
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {progress > 0 && state === "uploading" && (
-              <div className="progressBar">
-                <div
-                  className="progressFill"
-                  style={{ width: `${progress}%` }}
-                />
+              <div className="selectedFile">
+                <strong>{file.name}</strong>
+                <span>
+                  ({Math.round(file.size / 1024)} KB)
+                </span>
               </div>
             )}
-
-            <button
-              className="btnGreen"
-              disabled={!file || state === "uploading"}
-              onClick={handleUpload}
-            >
-              {state === "uploading"
-                ? "Uploading..."
-                : "Upload Invoice"}
-            </button>
           </div>
-        )}
-      </section>
-    </main>
+
+          {progress > 0 && state === "uploading" && (
+            <div className="progressBar">
+              <div
+                className="progressFill"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
+
+          <button
+            className="btnGreen"
+            disabled={!file || state === "uploading"}
+            onClick={handleUpload}
+          >
+            {state === "uploading"
+              ? "Uploading..."
+              : "Upload Invoice"}
+          </button>
+        </div>
+      )}
+    </Shell>
   );
 }

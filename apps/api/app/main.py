@@ -29,6 +29,15 @@ def health():
 def api_info():
     return {
         "message": "Invoice Intelligence API",
-        "implemented": ["health", "POST /api/v1/invoices/upload"],
-        "next": ["clients", "suppliers", "processing runs"],
+        "implemented": [
+            "health",
+            "POST /api/v1/invoices/upload",
+            "GET /api/v1/invoices",
+            "GET /api/v1/invoices/{id}",
+            "POST /api/v1/invoices/{id}/process",
+            "GET /api/v1/runs",
+            "GET /api/v1/runs/{id}",
+            "GET /api/v1/suppliers",
+        ],
+        "next": ["exceptions", "approvals", "dashboard"],
     }

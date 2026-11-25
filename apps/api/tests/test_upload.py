@@ -279,7 +279,7 @@ def test_get_draft_invalid_uuid_format():
     with _settings_patch(mock_client):
         response = client.get("/api/v1/invoices/drafts/not-a-uuid")
     assert response.status_code == 400, response.text
-    assert "Invalid draft ID format" in response.json()["detail"]
+    assert "Invalid ID format" in response.json()["detail"]
 
 
 def test_get_draft_not_found():
@@ -295,4 +295,144 @@ def test_save_draft_invalid_uuid_format():
     with _settings_patch(mock_client):
         response = client.post("/api/v1/invoices/drafts/not-a-uuid/save")
     assert response.status_code == 400, response.text
-    assert "Invalid draft ID format" in response.json()["detail"]
+    assert "Invalid ID format" in response.json()["detail"]
+
+
+def test_list_invoices():
+    mock_client = _make_mock_client()
+    # Mock the invoices table response - use a flexible chain that handles both with and without search
+    mock_table = mock_client.table.return_value
+    
+    # Create a chain mock that returns itself for eq, or_, order, range
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.or_.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[{"id": "inv-1", "invoice_number": "INV-001"}],
+        count=1
+    )
+    mock_table.select.return_value = chain_mock
+    
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "invoices" in body
+    assert "total" in body
+    assert body["total"] == 1
+
+
+def test_list_invoices_with_filters():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.or_.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[],
+        count=0
+    )
+    mock_table.select.return_value = chain_mock
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices?search=test&status=RECEIVED&page=2&page_size=10")
+    assert response.status_code == 200, response.text
+
+
+def test_get_invoice_not_found():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_table.select.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=[],
+        count=0
+    )
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/550e8400-e29b-41d4-a716-446655440000")
+    assert response.status_code == 404, response.text
+
+
+def test_get_invoice_invalid_uuid():
+    mock_client = _make_mock_client()
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/not-a-uuid")
+    assert response.status_code == 400, response.text
+
+
+def test_list_runs():
+    mock_client = _make_mock_client()
+    # Mock the processing_runs join query
+    mock_table = mock_client.table.return_value
+    mock_table.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+        data=[{"id": "run-1", "invoice_id": "inv-1", "run_number": 1, "status": "COMPLETED"}],
+    )
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/runs")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "runs" in body
+    assert "total" in body
+
+
+def test_get_run_not_found():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_table.select.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=[],
+    )
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/runs/550e8400-e29b-41d4-a716-446655440000")
+    assert response.status_code == 404, response.text
+
+
+def test_list_suppliers():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.or_.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[{"id": "sup-1", "legal_name": "Test Supplier"}],
+        count=1
+    )
+    mock_table.select.return_value = chain_mock
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/suppliers")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "suppliers" in body
+    assert "total" in body
+    assert body["total"] == 1
+
+
+def test_list_suppliers_with_filters():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    chain_mock = MagicMock()
+    chain_mock.eq.return_value = chain_mock
+    chain_mock.or_.return_value = chain_mock
+    chain_mock.order.return_value = chain_mock
+    chain_mock.range.return_value = chain_mock
+    chain_mock.execute.return_value = MagicMock(
+        data=[],
+        count=0
+    )
+    mock_table.select.return_value = chain_mock
+    with _settings_patch(mock_client):
+        response = client.get("/api/v1/invoices/suppliers?search=test&status=ACTIVE&page=2&page_size=10")
+    assert response.status_code == 200, response.text
+
+
+def test_process_invoice_not_found():
+    mock_client = _make_mock_client()
+    mock_table = mock_client.table.return_value
+    mock_table.select.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=[],
+    )
+    with _settings_patch(mock_client):
+        response = client.post("/api/v1/invoices/550e8400-e29b-41d4-a716-446655440000/process")
+    assert response.status_code == 404, response.text
