@@ -54,18 +54,37 @@ def _make_async_client(mock_response):
 
 VALID_EXTRACTION_JSON = json.dumps(
     {
-        "invoice_number": {"value": "INV-2024-001", "status": "FOUND", "confidence": 0.95},
-        "supplier": {
-            "legal_name": {"value": "Test Supplier", "status": "FOUND"},
-            "gstin": {"value": "27ABCDE1234F1Z5", "status": "FOUND"},
-        },
-        "buyer": {
-            "legal_name": {"value": "Buyer Corp", "status": "FOUND"},
-            "gstin": {"value": "27XYZAB5678G1Z6", "status": "FOUND"},
-        },
-        "amounts": {
-            "grand_total": {"value": "11800", "status": "FOUND", "confidence": 0.99},
-        },
+        "supplier_name": "Test Supplier",
+        "supplier_gstin": "27ABCDE1234F1Z5",
+        "buyer_name": "Buyer Corp",
+        "buyer_gstin": "27XYZAB5678G1Z6",
+        "invoice_number": "INV-2024-001",
+        "invoice_date": "2024-01-15",
+        "due_date": "2024-02-15",
+        "po_number": "PO-2024-001",
+        "currency": "INR",
+        "taxable_value": 10000.0,
+        "cgst": 900.0,
+        "sgst": 900.0,
+        "igst": None,
+        "total_tax": 1800.0,
+        "grand_total": 11800.0,
+        "line_items": [
+            {
+                "description": "Test Item 1",
+                "hsn_sac": "84718000",
+                "quantity": 2.0,
+                "unit_price": 4500.0,
+                "taxable_value": 9000.0,
+            },
+            {
+                "description": "Test Item 2",
+                "hsn_sac": "84716060",
+                "quantity": 3.0,
+                "unit_price": 1000.0,
+                "taxable_value": 3000.0,
+            },
+        ],
     }
 )
 
@@ -95,10 +114,10 @@ class TestExtractSuccess:
             extraction = await adapter.extract("INVOICE text here")
 
         assert isinstance(extraction, InvoiceExtraction)
-        assert extraction.invoice_number.value == "INV-2024-001"
-        assert extraction.supplier.legal_name.value == "Test Supplier"
-        assert extraction.supplier.gstin.value == "27ABCDE1234F1Z5"
-        assert extraction.amounts.grand_total.value == "11800"
+        assert extraction.invoice_number == "INV-2024-001"
+        assert extraction.supplier_name == "Test Supplier"
+        assert extraction.supplier_gstin == "27ABCDE1234F1Z5"
+        assert extraction.grand_total == 11800.0
 
     @pytest.mark.asyncio
     async def test_extract_posts_to_chat_completions_endpoint(self):
@@ -234,12 +253,135 @@ class TestExtractErrors:
     @pytest.mark.asyncio
     async def test_extract_schema_validation_failure_raises_error(self):
         adapter = _make_adapter()
-        invalid_schema_json = json.dumps({"invoice_number": "not-an-object"})
+        # grand_total expects float|null, passing a string should fail validation
+        invalid_schema_json = json.dumps({"grand_total": "not-a-number"})
         mock_response = _make_response(invalid_schema_json)
         mock_client = _make_async_client(mock_response)
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             with pytest.raises(AIExtractionError, match="Schema validation"):
+                await adapter.extract("INVOICE text")
+
+
+class TestResponseParsingEdgeCases:
+    """Edge cases for response parsing - empty content, reasoning-only, incomplete, etc."""
+
+    @pytest.mark.asyncio
+    async def test_empty_content_with_reasoning_present(self):
+        """Content is null/empty but reasoning_details is populated (reasoning model case)."""
+        adapter = _make_adapter(reasoning_enabled=True)
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "reasoning_details": {"tokens": 200, "reasoning": "thinking..."},
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "model": "nemotron-3.5-super-vl:free",
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(AIExtractionError, match="Empty response"):
+                await adapter.extract("INVOICE text")
+
+    @pytest.mark.asyncio
+    async def test_normal_content_with_reasoning(self):
+        """Normal content with reasoning_details - should parse content, not reasoning."""
+        adapter = _make_adapter(reasoning_enabled=True)
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": VALID_EXTRACTION_JSON,
+                        "reasoning_details": {"tokens": 150},
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "model": "nemotron-3.5-super-vl:free",
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            extraction = await adapter.extract("INVOICE text")
+
+        assert isinstance(extraction, InvoiceExtraction)
+        assert extraction.invoice_number == "INV-2024-001"
+
+    @pytest.mark.asyncio
+    async def test_incomplete_response_token_limit(self):
+        """finish_reason='length' means the response was truncated by max_tokens."""
+        adapter = _make_adapter()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"invoice_number": {"value": "INV-001", "status": "FOUND", "confidence": 0.9',
+                    },
+                    "finish_reason": "length",
+                }
+            ],
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(AIExtractionError, match="incomplete"):
+                await adapter.extract("INVOICE text")
+
+    @pytest.mark.asyncio
+    async def test_provider_error_response(self):
+        """OpenRouter returns a provider_error in the response body."""
+        adapter = _make_adapter()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [],
+            "provider_error": {"message": "Model overloaded", "code": 503},
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(AIExtractionError, match="Empty response"):
+                await adapter.extract("INVOICE text")
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_with_finish_reason_stop(self):
+        """Valid HTTP 200 but content is not valid JSON."""
+        adapter = _make_adapter()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {"content": "{broken json"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(AIExtractionError, match="Invalid JSON"):
                 await adapter.extract("INVOICE text")
 
 
@@ -357,4 +499,4 @@ class TestExtractWithAI:
 
         assert result is not None
         assert result.kind == "ai_enhanced"
-        assert result.extraction.invoice_number.value == "INV-2024-001"
+        assert result.extraction.invoice_number == "INV-2024-001"

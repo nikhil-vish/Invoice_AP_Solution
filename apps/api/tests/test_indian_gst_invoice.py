@@ -141,183 +141,37 @@ EXPECTED_TOTALS = {
 
 def _valid_ai_extraction_json() -> str:
     return json.dumps({
-        "invoice_number": {
-            "value": EXPECTED_INVOICE_NUMBER,
-            "normalized_value": EXPECTED_INVOICE_NUMBER,
-            "status": "FOUND",
-            "confidence": 0.98,
-        },
-        "invoice_date": {
-            "value": "25-Nov-2026",
-            "normalized_value": EXPECTED_INVOICE_DATE,
-            "status": "FOUND",
-            "confidence": 0.95,
-        },
-        "supplier": {
-            "legal_name": {
-                "value": EXPECTED_SUPPLIER_NAME,
-                "normalized_value": EXPECTED_SUPPLIER_NAME,
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-            "gstin": {
-                "value": EXPECTED_SUPPLIER_GSTIN,
-                "normalized_value": EXPECTED_SUPPLIER_GSTIN,
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-        },
-        "buyer": {
-            "legal_name": {
-                "value": EXPECTED_BUYER_NAME,
-                "normalized_value": EXPECTED_BUYER_NAME,
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-            "gstin": {
-                "value": EXPECTED_BUYER_GSTIN,
-                "normalized_value": EXPECTED_BUYER_GSTIN,
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-        },
-        "commercial": {
-            "po_number": {
-                "value": EXPECTED_PO_NUMBER,
-                "normalized_value": EXPECTED_PO_NUMBER,
-                "status": "FOUND",
-                "confidence": 0.97,
-            },
-            "currency": {
-                "value": EXPECTED_CURRENCY,
-                "normalized_value": EXPECTED_CURRENCY,
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-        },
-        "amounts": {
-            "taxable_value": {
-                "value": "12,000",
-                "normalized_value": "12000",
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-            "cgst": {
-                "value": "1,080",
-                "normalized_value": "1080",
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-            "sgst": {
-                "value": "1,080",
-                "normalized_value": "1080",
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-            "total_tax": {
-                "value": "2,160",
-                "normalized_value": "2160",
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-            "grand_total": {
-                "value": "14,160",
-                "normalized_value": "14160",
-                "status": "FOUND",
-                "confidence": 0.99,
-            },
-        },
+        "supplier_name": EXPECTED_SUPPLIER_NAME,
+        "supplier_gstin": EXPECTED_SUPPLIER_GSTIN,
+        "buyer_name": EXPECTED_BUYER_NAME,
+        "buyer_gstin": EXPECTED_BUYER_GSTIN,
+        "invoice_number": EXPECTED_INVOICE_NUMBER,
+        "invoice_date": EXPECTED_INVOICE_DATE,
+        "due_date": EXPECTED_DUE_DATE,
+        "po_number": EXPECTED_PO_NUMBER,
+        "currency": EXPECTED_CURRENCY,
+        "taxable_value": EXPECTED_TOTALS["taxable_value"],
+        "cgst": EXPECTED_TOTALS["cgst"],
+        "sgst": EXPECTED_TOTALS["sgst"],
+        "igst": None,
+        "total_tax": EXPECTED_TOTALS["total_tax"],
+        "grand_total": EXPECTED_TOTALS["invoice_grand_total"],
         "line_items": [
             {
-                "description": {
-                    "value": EXPECTED_LINE_ITEMS[0]["description"],
-                    "normalized_value": EXPECTED_LINE_ITEMS[0]["description"],
-                    "status": "FOUND",
-                    "confidence": 0.98,
-                },
-                "hsn_sac": {
-                    "value": EXPECTED_LINE_ITEMS[0]["hsn_sac"],
-                    "normalized_value": EXPECTED_LINE_ITEMS[0]["hsn_sac"],
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "quantity": {
-                    "value": "2",
-                    "normalized_value": "2",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "unit_price": {
-                    "value": "4,500",
-                    "normalized_value": "4500",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "taxable_value": {
-                    "value": "9,000",
-                    "normalized_value": "9000",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "line_total": {
-                    "value": "9,000",
-                    "normalized_value": "9000",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
+                "description": EXPECTED_LINE_ITEMS[0]["description"],
+                "hsn_sac": EXPECTED_LINE_ITEMS[0]["hsn_sac"],
+                "quantity": EXPECTED_LINE_ITEMS[0]["quantity"],
+                "unit_price": EXPECTED_LINE_ITEMS[0]["unit_price"],
+                "taxable_value": EXPECTED_LINE_ITEMS[0]["taxable_value"],
             },
             {
-                "description": {
-                    "value": EXPECTED_LINE_ITEMS[1]["description"],
-                    "normalized_value": EXPECTED_LINE_ITEMS[1]["description"],
-                    "status": "FOUND",
-                    "confidence": 0.98,
-                },
-                "hsn_sac": {
-                    "value": EXPECTED_LINE_ITEMS[1]["hsn_sac"],
-                    "normalized_value": EXPECTED_LINE_ITEMS[1]["hsn_sac"],
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "quantity": {
-                    "value": "3",
-                    "normalized_value": "3",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "unit_price": {
-                    "value": "1,000",
-                    "normalized_value": "1000",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "taxable_value": {
-                    "value": "3,000",
-                    "normalized_value": "3000",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
-                "line_total": {
-                    "value": "3,000",
-                    "normalized_value": "3000",
-                    "status": "FOUND",
-                    "confidence": 0.99,
-                },
+                "description": EXPECTED_LINE_ITEMS[1]["description"],
+                "hsn_sac": EXPECTED_LINE_ITEMS[1]["hsn_sac"],
+                "quantity": EXPECTED_LINE_ITEMS[1]["quantity"],
+                "unit_price": EXPECTED_LINE_ITEMS[1]["unit_price"],
+                "taxable_value": EXPECTED_LINE_ITEMS[1]["taxable_value"],
             },
         ],
-        "payment": {
-            "due_date": {
-                "value": "25-Dec-2026",
-                "normalized_value": EXPECTED_DUE_DATE,
-                "status": "FOUND",
-                "confidence": 0.95,
-            },
-        },
-        "extraction_metadata": {
-            "provider": "openrouter",
-            "model": "test-model",
-            "prompt_version": "invoice-extraction-v1",
-        },
     })
 
 
@@ -435,33 +289,33 @@ class TestExtractionWithAIMocked:
         extraction = result.extraction
 
         # Supplier and buyer GSTINs not swapped
-        assert extraction.supplier.gstin.value == EXPECTED_SUPPLIER_GSTIN
-        assert extraction.buyer.gstin.value == EXPECTED_BUYER_GSTIN
-        assert extraction.supplier.gstin.value != extraction.buyer.gstin.value
+        assert extraction.supplier_gstin == EXPECTED_SUPPLIER_GSTIN
+        assert extraction.buyer_gstin == EXPECTED_BUYER_GSTIN
+        assert extraction.supplier_gstin != extraction.buyer_gstin
 
         # Invoice fields
-        assert extraction.invoice_number.value == EXPECTED_INVOICE_NUMBER
-        assert extraction.invoice_date.normalized_value == EXPECTED_INVOICE_DATE
+        assert extraction.invoice_number == EXPECTED_INVOICE_NUMBER
+        assert extraction.invoice_date == EXPECTED_INVOICE_DATE
 
         # Line items
         assert len(extraction.line_items) == 2
         li1 = extraction.line_items[0]
-        assert li1.description.value == EXPECTED_LINE_ITEMS[0]["description"]
-        assert li1.hsn_sac.value == EXPECTED_LINE_ITEMS[0]["hsn_sac"]
-        assert float(li1.quantity.value) == EXPECTED_LINE_ITEMS[0]["quantity"]
-        assert float(li1.unit_price.normalized_value) == EXPECTED_LINE_ITEMS[0]["unit_price"]
-        assert float(li1.taxable_value.normalized_value) == EXPECTED_LINE_ITEMS[0]["taxable_value"]
+        assert li1.description == EXPECTED_LINE_ITEMS[0]["description"]
+        assert li1.hsn_sac == EXPECTED_LINE_ITEMS[0]["hsn_sac"]
+        assert li1.quantity == EXPECTED_LINE_ITEMS[0]["quantity"]
+        assert li1.unit_price == EXPECTED_LINE_ITEMS[0]["unit_price"]
+        assert li1.taxable_value == EXPECTED_LINE_ITEMS[0]["taxable_value"]
 
         li2 = extraction.line_items[1]
-        assert li2.description.value == EXPECTED_LINE_ITEMS[1]["description"]
-        assert li2.hsn_sac.value == EXPECTED_LINE_ITEMS[1]["hsn_sac"]
+        assert li2.description == EXPECTED_LINE_ITEMS[1]["description"]
+        assert li2.hsn_sac == EXPECTED_LINE_ITEMS[1]["hsn_sac"]
 
         # Arithmetic
-        assert float(extraction.amounts.taxable_value.normalized_value) == EXPECTED_TOTALS["taxable_value"]
-        assert float(extraction.amounts.cgst.normalized_value) == EXPECTED_TOTALS["cgst"]
-        assert float(extraction.amounts.sgst.normalized_value) == EXPECTED_TOTALS["sgst"]
-        assert float(extraction.amounts.total_tax.normalized_value) == EXPECTED_TOTALS["total_tax"]
-        assert float(extraction.amounts.grand_total.normalized_value) == EXPECTED_TOTALS["invoice_grand_total"]
+        assert extraction.taxable_value == EXPECTED_TOTALS["taxable_value"]
+        assert extraction.cgst == EXPECTED_TOTALS["cgst"]
+        assert extraction.sgst == EXPECTED_TOTALS["sgst"]
+        assert extraction.total_tax == EXPECTED_TOTALS["total_tax"]
+        assert extraction.grand_total == EXPECTED_TOTALS["invoice_grand_total"]
 
     @pytest.mark.asyncio
     async def test_ai_extraction_malformed_json(self):
@@ -576,8 +430,8 @@ class TestLiveModelExtraction:
         assert result.extraction is not None
         extraction = result.extraction
 
-        assert extraction.supplier.gstin.value == EXPECTED_SUPPLIER_GSTIN
-        assert extraction.buyer.gstin.value == EXPECTED_BUYER_GSTIN
-        assert extraction.supplier.gstin.value != extraction.buyer.gstin.value
+        assert extraction.supplier_gstin == EXPECTED_SUPPLIER_GSTIN
+        assert extraction.buyer_gstin == EXPECTED_BUYER_GSTIN
+        assert extraction.supplier_gstin != extraction.buyer_gstin
         assert len(extraction.line_items) == 2
-        assert float(extraction.amounts.grand_total.value) == EXPECTED_TOTALS["invoice_grand_total"]
+        assert extraction.grand_total == EXPECTED_TOTALS["invoice_grand_total"]

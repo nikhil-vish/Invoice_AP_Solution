@@ -12,7 +12,7 @@ import fitz
 
 from app.config import settings
 from app.invoices.fields import HEADER_FIELDS, LINE_FIELDS
-from app.invoices.models import InvoiceExtraction, ExtractionResult, ExtractionField, LineItem
+from app.invoices.models import InvoiceExtraction, ExtractionResult, LineItem
 from app.invoices.ai_extract import extract_with_ai, AIExtractionError
 logger = logging.getLogger(__name__)
 
@@ -153,8 +153,8 @@ def merge_extractions(
         ai_field = _get_ai_field(ai_extraction, key)
         regex_value = regex_result.get("fields", {}).get(key)
 
-        if ai_field and ai_field.status == "FOUND" and ai_field.value:
-            merged_fields[key] = ai_field.normalized_value or ai_field.value
+        if ai_field:
+            merged_fields[key] = ai_field
             merged_field_status[key] = "found"
         elif regex_value is not None:
             merged_fields[key] = regex_value
@@ -176,46 +176,46 @@ def merge_extractions(
 
 
 def _ai_to_flat_fields(extraction: InvoiceExtraction) -> Dict[str, Optional[str]]:
-    """Convert AI extraction nested structure to flat fields dict."""
+    """Convert AI extraction to flat fields dict."""
     return {
-        "supplier_legal_name": extraction.supplier.legal_name.normalized_value or extraction.supplier.legal_name.value,
-        "supplier_gstin": extraction.supplier.gstin.normalized_value or extraction.supplier.gstin.value,
-        "supplier_address": extraction.supplier.address.normalized_value or extraction.supplier.address.value,
-        "invoice_number": extraction.invoice_number.normalized_value or extraction.invoice_number.value,
-        "invoice_date": extraction.invoice_date.normalized_value or extraction.invoice_date.value,
-        "due_date": extraction.payment.due_date.normalized_value or extraction.payment.due_date.value,
-        "buyer_legal_name": extraction.buyer.legal_name.normalized_value or extraction.buyer.legal_name.value,
-        "buyer_gstin": extraction.buyer.gstin.normalized_value or extraction.buyer.gstin.value,
-        "po_number": extraction.commercial.po_number.normalized_value or extraction.commercial.po_number.value,
-        "taxable_value": extraction.amounts.taxable_value.normalized_value or extraction.amounts.taxable_value.value,
-        "cgst": extraction.amounts.cgst.normalized_value or extraction.amounts.cgst.value,
-        "sgst": extraction.amounts.sgst.normalized_value or extraction.amounts.sgst.value,
-        "igst": extraction.amounts.igst.normalized_value or extraction.amounts.igst.value,
-        "total_tax": extraction.amounts.total_tax.normalized_value or extraction.amounts.total_tax.value,
-        "invoice_grand_total": extraction.amounts.grand_total.normalized_value or extraction.amounts.grand_total.value,
-        "currency": extraction.commercial.currency.normalized_value or extraction.commercial.currency.value,
+        "supplier_legal_name": extraction.supplier_name,
+        "supplier_gstin": extraction.supplier_gstin,
+        "supplier_address": None,
+        "invoice_number": extraction.invoice_number,
+        "invoice_date": extraction.invoice_date,
+        "due_date": extraction.due_date,
+        "buyer_legal_name": extraction.buyer_name,
+        "buyer_gstin": extraction.buyer_gstin,
+        "po_number": extraction.po_number,
+        "taxable_value": str(extraction.taxable_value) if extraction.taxable_value is not None else None,
+        "cgst": str(extraction.cgst) if extraction.cgst is not None else None,
+        "sgst": str(extraction.sgst) if extraction.sgst is not None else None,
+        "igst": str(extraction.igst) if extraction.igst is not None else None,
+        "total_tax": str(extraction.total_tax) if extraction.total_tax is not None else None,
+        "invoice_grand_total": str(extraction.grand_total) if extraction.grand_total is not None else None,
+        "currency": extraction.currency,
     }
 
 
-def _get_ai_field(extraction: InvoiceExtraction, key: str) -> Optional[ExtractionField]:
-    """Get an ExtractionField from AI extraction by flat key."""
+def _get_ai_field(extraction: InvoiceExtraction, key: str) -> Optional[str]:
+    """Get an AI field value by flat key."""
     field_map = {
-        "supplier_legal_name": extraction.supplier.legal_name,
-        "supplier_gstin": extraction.supplier.gstin,
-        "supplier_address": extraction.supplier.address,
+        "supplier_legal_name": extraction.supplier_name,
+        "supplier_gstin": extraction.supplier_gstin,
+        "supplier_address": None,
         "invoice_number": extraction.invoice_number,
         "invoice_date": extraction.invoice_date,
-        "due_date": extraction.payment.due_date,
-        "buyer_legal_name": extraction.buyer.legal_name,
-        "buyer_gstin": extraction.buyer.gstin,
-        "po_number": extraction.commercial.po_number,
-        "taxable_value": extraction.amounts.taxable_value,
-        "cgst": extraction.amounts.cgst,
-        "sgst": extraction.amounts.sgst,
-        "igst": extraction.amounts.igst,
-        "total_tax": extraction.amounts.total_tax,
-        "invoice_grand_total": extraction.amounts.grand_total,
-        "currency": extraction.commercial.currency,
+        "due_date": extraction.due_date,
+        "buyer_legal_name": extraction.buyer_name,
+        "buyer_gstin": extraction.buyer_gstin,
+        "po_number": extraction.po_number,
+        "taxable_value": str(extraction.taxable_value) if extraction.taxable_value is not None else None,
+        "cgst": str(extraction.cgst) if extraction.cgst is not None else None,
+        "sgst": str(extraction.sgst) if extraction.sgst is not None else None,
+        "igst": str(extraction.igst) if extraction.igst is not None else None,
+        "total_tax": str(extraction.total_tax) if extraction.total_tax is not None else None,
+        "invoice_grand_total": str(extraction.grand_total) if extraction.grand_total is not None else None,
+        "currency": extraction.currency,
     }
     return field_map.get(key)
 
@@ -225,12 +225,12 @@ def _ai_to_line_items(extraction: InvoiceExtraction) -> List[Dict[str, Any]]:
     items = []
     for item in extraction.line_items:
         items.append({
-            "description": item.description.normalized_value or item.description.value,
-            "hsn_sac": item.hsn_sac.normalized_value or item.hsn_sac.value,
-            "quantity": _parse_number(item.quantity.normalized_value or item.quantity.value),
-            "unit_price": _parse_number(item.unit_price.normalized_value or item.unit_price.value),
-            "taxable_value": _parse_number(item.taxable_value.normalized_value or item.taxable_value.value),
-            "cgst": _parse_number(item.tax_amount.normalized_value or item.tax_amount.value) if item.tax_amount.value else None,
+            "description": item.description,
+            "hsn_sac": item.hsn_sac,
+            "quantity": item.quantity,
+            "unit_price": item.unit_price,
+            "taxable_value": item.taxable_value,
+            "cgst": None,
             "sgst": None,
             "igst": None,
         })

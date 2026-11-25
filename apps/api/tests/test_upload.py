@@ -110,7 +110,7 @@ def test_upload_valid_digital_pdf():
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"] == "EXTRACTED"
-    assert body["extraction_kind"] == "digital"
+    assert body["extraction_kind"] == "ai_enhanced"
     assert body["ocr_supported"] is False
     assert body["filename"] == "invoice.pdf"
     assert body["fields"]["invoice_number"] == "INV-2024-001"
