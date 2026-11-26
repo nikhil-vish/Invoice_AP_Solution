@@ -25,9 +25,11 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Fixed IDs matching backend DEFAULT_CLIENT_ID
-CLIENT_ID = "00000000-0000-0000-0000-000000000001"
-ENTITY_ID = "11111111-1111-1111-1111-111111111111"
+# Fixed IDs matching the canonical workspace seeded by migration 0005.
+# These must match what app/invoices/repository.resolve_demo_workspace resolves
+# (client by display_name 'Invoice Intelligence Demo Workspace', then its active entity).
+CLIENT_ID = "11111111-1111-4111-8111-111111111111"
+ENTITY_ID = "22222222-2222-4222-8222-222222222222"
 SUPPLIER_ID = "22222222-2222-2222-2222-222222222222"
 
 # Invoice IDs (fixed for idempotency)
@@ -64,8 +66,8 @@ def seed():
     print("  Creating client...")
     client.table("clients").upsert({
         "id": CLIENT_ID,
-        "legal_name": "Demo Corp Pvt Ltd",
-        "display_name": "Demo Corp",
+        "legal_name": "Invoice Intelligence Demo Workspace",
+        "display_name": "Invoice Intelligence Demo Workspace",
         "status": "ACTIVE",
     }, on_conflict="id").execute()
 

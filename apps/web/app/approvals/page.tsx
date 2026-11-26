@@ -9,7 +9,7 @@ const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 interface ApprovalInvoice {
   invoice_number: string;
-  supplier_name: string;
+  supplier_legal_name: string | null;
   total_amount: number;
   currency: string;
 }
@@ -236,7 +236,7 @@ export default function ApprovalsPage() {
                   className={selected?.id === app.id ? "selectedRow" : ""}
                 >
                   <td><strong>{app.invoices.invoice_number || "—"}</strong></td>
-                  <td>{app.invoices.supplier_name}</td>
+                  <td>{app.invoices.supplier_legal_name || "—"}</td>
                   <td>{formatCurrency(app.invoices.total_amount, app.invoices.currency)}</td>
                   <td>{app.approval_level}</td>
                   <td>
@@ -293,7 +293,7 @@ export default function ApprovalsPage() {
             </div>
             <div className="fieldRow">
               <label>Supplier</label>
-              <span>{selected.invoices.supplier_name}</span>
+              <span>{selected.invoices.supplier_legal_name || "—"}</span>
             </div>
             <div className="fieldRow">
               <label>Amount</label>

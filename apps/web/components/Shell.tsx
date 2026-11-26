@@ -17,6 +17,7 @@ const navigation: NavItem[] = [
   { section: "WORKSPACE", label: "Live processing", href: "/processing", icon: "⌁" },
   { section: "WORKSPACE", label: "Exception centre", href: "/exceptions", icon: "⚑" },
   { section: "WORKSPACE", label: "Approvals", href: "/approvals", icon: "✓" },
+  { section: "WORKSPACE", label: "AI Copilot", href: "/copilot", icon: "✦" },
   { section: "CONFIGURATION", label: "Suppliers", href: "/suppliers", icon: "▣" },
   { section: "CONFIGURATION", label: "Settings", href: "/settings", icon: "⚙" },
 ];

@@ -4,10 +4,12 @@ import { Shell } from "@/components/Shell";
 import { useState, useEffect, useCallback } from "react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 interface ExceptionInvoice {
   invoice_number: string;
-  supplier_name: string;
+  supplier_legal_name: string | null;
 }
 
 interface ExceptionItem {
@@ -38,10 +40,32 @@ export default function ExceptionsPage() {
   const [total, setTotal] = useState(0);
   const [severityFilter, setSeverityFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [token, setToken] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState<{ id: string; action: string; value: string } | null>(null);
   const [selected, setSelected] = useState<ExceptionItem | null>(null);
+
+  useEffect(() => {
+    setToken(window.localStorage.getItem("supabase_access_token"));
+  }, []);
+
+  const signIn = async () => {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { setToast({ type: "error", message: "Configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY." }); return; }
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method: "POST", headers: { "apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+      if (!res.ok) throw new Error("Sign-in failed.");
+      const session = await res.json();
+      window.localStorage.setItem("supabase_access_token", session.access_token);
+      setToken(session.access_token);
+      setPassword("");
+      setToast({ type: "success", message: "Signed in as reviewer." });
+    } catch (err) {
+      setToast({ type: "error", message: err instanceof Error ? err.message : "Sign-in failed." });
+    }
+  };
 
   const fetchExceptions = useCallback(async () => {
     setLoading(true);
@@ -62,9 +86,7 @@ export default function ExceptionsPage() {
     }
   }, [page, severityFilter, statusFilter]);
 
-  useEffect(() => {
-    fetchExceptions();
-  }, [fetchExceptions]);
+  const headersForToken = () => ({ "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) });
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -97,6 +119,7 @@ export default function ExceptionsPage() {
 
   const submitConfirm = async () => {
     if (!confirm) return;
+    if (!token) { setToast({ type: "error", message: "Sign in with Supabase Auth before deciding." }); return; }
     const { id, action, value } = confirm;
     const isResolve = action === "resolve";
     if (isResolve && !value.trim()) {
@@ -108,7 +131,7 @@ export default function ExceptionsPage() {
       if (isResolve) {
         const res = await fetch(`${API_BASE_URL}/api/v1/invoices/exceptions/${id}/resolve`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { ...headersForToken(), "Content-Type": "application/json" },
           body: JSON.stringify({ resolution_comment: value, actor_id: "current-user" }),
         });
         if (!res.ok) {
@@ -121,7 +144,7 @@ export default function ExceptionsPage() {
       } else {
         const res = await fetch(`${API_BASE_URL}/api/v1/invoices/exceptions/${id}/assign`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { ...headersForToken(), "Content-Type": "application/json" },
           body: JSON.stringify({ owner_team: value, actor_id: "current-user" }),
         });
         if (!res.ok) {
@@ -156,6 +179,51 @@ export default function ExceptionsPage() {
         <div className="emptyState">
           <div className="emptyIcon">↻</div>
           <strong>Loading exceptions…</strong>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (!token) {
+    return (
+      <Shell>
+        <header className="topbar">
+          <div>
+            <div className="eyebrow">ACCOUNTS PAYABLE / EXCEPTIONS</div>
+            <h1>Exception Centre</h1>
+          </div>
+        </header>
+        <div style={{ padding: 24, textAlign: "center" }}>
+          <h2>Sign in to manage exceptions</h2>
+          <p style={{ marginBottom: 16 }}>Please sign in with Supabase Auth to assign or resolve exceptions.</p>
+          <div style={{ maxWidth: 400, margin: "0 auto" }}>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 6 }}>Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="user@example.com"
+                style={{ width: "100%", padding: "8px", fontSize: 14 }}
+              />
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 6 }}>Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                style={{ width: "100%", padding: "8px", fontSize: 14 }}
+              />
+            </div>
+            <button
+              onClick={signIn}
+              style={{ width: "100%", padding: "10px", fontSize: 14 }}
+            >
+              Sign In
+            </button>
+          </div>
         </div>
       </Shell>
     );
@@ -250,7 +318,7 @@ export default function ExceptionsPage() {
                 >
                   <td><code>{exc.exception_code}</code></td>
                   <td>{exc.invoices.invoice_number || exc.invoice_id.slice(0, 8) + "…"}</td>
-                  <td>{exc.invoices.supplier_name}</td>
+                  <td>{exc.invoices.supplier_legal_name || "—"}</td>
                   <td>
                     <span className={`statusBadge ${getSeverityColor(exc.severity)}`}>{exc.severity}</span>
                   </td>
@@ -312,7 +380,7 @@ export default function ExceptionsPage() {
             </div>
             <div className="fieldRow">
               <label>Supplier</label>
-              <span>{selected.invoices.supplier_name}</span>
+              <span>{selected.invoices.supplier_legal_name || "—"}</span>
             </div>
             <div className="fieldRow">
               <label>Severity</label>

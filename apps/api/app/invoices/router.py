@@ -39,6 +39,9 @@ from app.invoices.repository import (
     insert_invoice_items,
     insert_invoice_document,
     update_invoice_status,
+    transition_invoice,
+    list_lifecycle_events,
+    record_lifecycle_event,
     list_processing_runs,
     get_processing_run,
     insert_processing_run,
@@ -52,6 +55,8 @@ from app.invoices.repository import (
     assign_exception,
     resolve_exception,
     action_approval,
+    insert_approval,
+    insert_exception,
     get_draft_by_id,
     get_invoice_by_draft_id,
     convert_draft_to_invoice,
@@ -61,6 +66,7 @@ from app.invoices.repository import (
     resolve_demo_workspace,
     update_draft_and_invoice,
     duplicate_invoice_exists,
+    phase4_context,
     next_analysis_attempt,
     insert_invoice_analysis,
     latest_invoice_analysis,
@@ -73,6 +79,7 @@ from supabase import create_client
 from app.invoices.ai_analysis import analyse_invoice
 from app.invoices.ai_extract import AIExtractionError
 from app.invoices.validation import validate_invoice
+from app.invoices.matching import phase4_checks
 
 router = APIRouter(prefix="/api/v1/invoices", tags=["invoices"])
 
@@ -113,6 +120,23 @@ class ReviewLineItem(BaseModel):
 class DraftSaveRequest(BaseModel):
     fields: dict[str, ReviewFieldValue]
     line_items: list[ReviewLineItem]
+
+
+class PurchaseOrderLine(BaseModel):
+    description: str
+    quantity: Optional[Decimal] = None
+    unit_price: Optional[Decimal] = None
+    taxable_value: Optional[Decimal] = None
+
+
+class PurchaseOrderImportRequest(BaseModel):
+    po_number: str
+    supplier_id: str
+    total_amount: Decimal
+    currency: str = "INR"
+    valid_from: Optional[str] = None
+    valid_to: Optional[str] = None
+    items: list[PurchaseOrderLine] = []
 
 
 def _sha256(data: bytes) -> str:
@@ -240,6 +264,33 @@ async def get_run(run_id: str = Path(...)):
 
 # Suppliers sub-router
 suppliers_router = APIRouter(prefix="/suppliers", tags=["suppliers"])
+
+# Lightweight import only: this supplies matching context, not procurement workflows.
+purchase_orders_router = APIRouter(prefix="/purchase-orders", tags=["purchase-orders"])
+
+
+@purchase_orders_router.post("/import")
+async def import_purchase_order(request: PurchaseOrderImportRequest):
+    client = _get_client()
+    _, entity_id = resolve_demo_workspace(client)
+    try:
+        po = (client.table("purchase_orders").insert({
+            "client_entity_id": entity_id, "supplier_id": request.supplier_id, "po_number": request.po_number,
+            "currency": request.currency.upper(), "total_amount": str(request.total_amount), "status": "APPROVED",
+            "valid_from": request.valid_from, "valid_to": request.valid_to,
+        }).execute().data or [None])[0]
+        if not po:
+            raise RepositoryError("PO import returned no record")
+        lines = [{"purchase_order_id": po["id"], "line_number": index + 1, "description": line.description,
+                  "quantity": str(line.quantity) if line.quantity is not None else None,
+                  "unit_price": str(line.unit_price) if line.unit_price is not None else None,
+                  "taxable_value": str(line.taxable_value) if line.taxable_value is not None else None}
+                 for index, line in enumerate(request.items)]
+        if lines:
+            client.table("purchase_order_items").insert(lines).execute()
+        return {"purchase_order": po, "line_count": len(lines)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not import purchase order: {exc}")
 
 
 @suppliers_router.get("")
@@ -406,16 +457,20 @@ async def get_exception_endpoint(exception_id: str = Path(...)):
 async def assign_exception_endpoint(
     exception_id: str = Path(...),
     request: ExceptionAssignRequest = None,
+    authorization: Optional[str] = Header(None),
 ):
     """Assign an exception to an owner team."""
     _validate_uuid(exception_id)
+    reviewer_id = _verified_reviewer_id(authorization)
     client = _get_client()
+    if not request:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A request body is required.")
     try:
         result = assign_exception(
             client,
             exception_id=exception_id,
             owner_team=request.owner_team,
-            actor_id=request.actor_id,
+            actor_id=reviewer_id,
         )
     except RepositoryError as exc:
         raise HTTPException(
@@ -439,16 +494,20 @@ async def assign_exception_endpoint(
 async def resolve_exception_endpoint(
     exception_id: str = Path(...),
     request: ExceptionResolveRequest = None,
+    authorization: Optional[str] = Header(None),
 ):
     """Resolve an exception with a mandatory resolution comment."""
     _validate_uuid(exception_id)
+    reviewer_id = _verified_reviewer_id(authorization)
     client = _get_client()
+    if not request:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A request body is required.")
     try:
         result = resolve_exception(
             client,
             exception_id=exception_id,
             resolution_comment=request.resolution_comment,
-            actor_id=request.actor_id,
+            actor_id=reviewer_id,
         )
     except RepositoryError as exc:
         raise HTTPException(
@@ -471,6 +530,7 @@ async def resolve_exception_endpoint(
 # Include sub-routers FIRST so their routes have priority over catch-all routes
 router.include_router(runs_router)
 router.include_router(suppliers_router)
+router.include_router(purchase_orders_router)
 router.include_router(approvals_router)
 router.include_router(exceptions_router)
 
@@ -688,93 +748,145 @@ async def get_invoice_endpoint(invoice_id: str = Path(...)):
 
 
 async def _run_analysis(invoice_id: str, run_id: str) -> None:
-    """Background worker: deterministic checks first, then advisory AI analysis."""
+    """Background worker: deterministic checks first, then advisory AI analysis.
+    AI is optional — if not enabled/configured, deterministic-only path is taken.
+    """
     client = _get_client()
-    update_invoice_status(client, invoice_id, "PROCESSING")
+    update_processing_run(client, run_id, "RUNNING")
+    transition_invoice(client, invoice_id, "PROCESSING", "ANALYSIS_RUNNING", "ANALYSIS_STARTED", processing_run_id=run_id)
     invoice = get_invoice(client, invoice_id)
     if not invoice:
         return
     checks = validate_invoice(invoice, invoice.get("items", []), duplicate_invoice_exists(client, invoice))
+    po, history = phase4_context(client, invoice)
+    checks.extend(phase4_checks(invoice, invoice.get("items", []), po, history))
     for check in checks:
         insert_validation_result(client, {"processing_run_id": run_id, "stage": "PHASE_2A", **check})
-    attempt = next_analysis_attempt(client, invoice_id)
+
+    hard_failure = any(result["status"] == "FAILED" for result in checks)
+
+    ai_enabled = settings.ai_extraction_enabled and bool(settings.openrouter_api_key) and bool(settings.openrouter_model)
+    ai_completed = False
+    recommendation = None
+    risk_level = None
+    provider_error = None
+
+    if ai_enabled:
+        attempt = next_analysis_attempt(client, invoice_id)
+        try:
+            analysis = await analyse_invoice(invoice, invoice.get("items", []), checks)
+            insert_invoice_analysis(client, {"invoice_id": invoice_id, "processing_run_id": run_id, "attempt_number": attempt,
+                "status": "COMPLETED", **analysis.model_dump(mode="json")})
+            ai_completed = True
+            recommendation = analysis.recommendation
+            risk_level = analysis.risk_level
+        except Exception as exc:
+            insert_invoice_analysis(client, {"invoice_id": invoice_id, "processing_run_id": run_id, "attempt_number": attempt,
+                "status": "FAILED", "findings": [], "validation_results": checks, "provider_error": str(exc)})
+            provider_error = str(exc)
+    else:
+        # AI intentionally disabled / not configured — no analysis attempt
+        pass
+
+    # Stage decision — honest, no fabricated recommendation
+    if not ai_completed:
+        stage = "REVIEW_REQUIRED" if hard_failure else "HUMAN_APPROVAL"
+    elif recommendation == "REQUEST_CLARIFICATION":
+        stage = "CLARIFICATION_REQUIRED"
+    elif hard_failure or risk_level == "HIGH" or recommendation == "REJECT":
+        stage = "REVIEW_REQUIRED"
+    else:
+        stage = "HUMAN_APPROVAL"
+
+    # WP4: runtime actionable workflow records — idempotent, never block processing
     try:
-        analysis = await analyse_invoice(invoice, invoice.get("items", []), checks)
-        insert_invoice_analysis(client, {"invoice_id": invoice_id, "processing_run_id": run_id, "attempt_number": attempt,
-            "status": "COMPLETED", **analysis.model_dump(mode="json")})
-        hard_failure = any(result["status"] == "FAILED" for result in checks)
-        stage = "REVIEW_REQUIRED" if hard_failure or analysis.recommendation != "APPROVE" else "HUMAN_APPROVAL"
-        client.table("invoices").update({"processing_status": "PENDING_APPROVAL", "current_stage": stage}).eq("id", invoice_id).execute()
-        update_processing_run(client, run_id, "COMPLETED", {"recommendation": analysis.recommendation, "deterministic_failures": hard_failure})
+        if not ai_completed and hard_failure:
+            # Deterministic hard failure → actionable exception
+            failed_checks = [c for c in checks if c.get("status") == "FAILED"]
+            code = failed_checks[0].get("rule_code", "DETERMINISTIC_FAILURE")
+            insert_exception(
+                client,
+                invoice_id,
+                run_id,
+                code,
+                "HIGH",
+                f"Deterministic check failed: {code}",
+                owner_team="tax-team",
+            )
+        elif ai_completed and recommendation == "REQUEST_CLARIFICATION":
+            insert_exception(
+                client,
+                invoice_id,
+                run_id,
+                "AI_CLARIFICATION_REQUESTED",
+                "MEDIUM",
+                "AI requests clarification before approval",
+                owner_team="tax-team",
+            )
+        else:
+            # No active pending approval → create one for human review
+            existing_approval = client.table("approvals").select("id").eq("invoice_id", invoice_id).eq("status", "PENDING").execute().data or []
+            if not existing_approval:
+                insert_approval(client, invoice_id, processing_run_id=run_id)
     except Exception as exc:
-        insert_invoice_analysis(client, {"invoice_id": invoice_id, "processing_run_id": run_id, "attempt_number": attempt,
-            "status": "FAILED", "findings": [], "validation_results": checks, "provider_error": str(exc)})
-        client.table("invoices").update({"processing_status": "PENDING_APPROVAL", "current_stage": "REVIEW_REQUIRED"}).eq("id", invoice_id).execute()
-        update_processing_run(client, run_id, "COMPLETED", {"analysis_status": "FAILED", "provider_error": str(exc)})
+        # Never let workflow-record creation block deterministic processing or raise to user
+        pass
+
+    transition_invoice(client, invoice_id, "PENDING_APPROVAL", stage, "ANALYSIS_COMPLETED",
+                       processing_run_id=run_id, payload={"recommendation": recommendation,
+                       "risk_level": risk_level, "deterministic_failures": hard_failure, "ai_enabled": ai_enabled, "provider_error": provider_error})
+
+    run_status = "COMPLETED" if ai_completed or not ai_enabled else "FAILED"
+    update_processing_run(client, run_id, run_status, {"recommendation": recommendation, "risk_level": risk_level, "deterministic_failures": hard_failure, "ai_enabled": ai_enabled, "provider_error": provider_error})
+
+
+async def _queue_analysis(background_tasks: BackgroundTasks, invoice_id: str, trigger: str) -> dict:
+    """Create exactly one queued run; used for submit, correction resubmission and retry."""
+    client = _get_client()
+    invoice = get_invoice(client, invoice_id)
+    if not invoice:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found.")
+    if invoice.get("processing_status") in {"QUEUED", "PROCESSING"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Processing is already active for this invoice.")
+    existing = client.table("processing_runs").select("run_number").eq("invoice_id", invoice_id).order("run_number", desc=True).limit(1).execute()
+    run_number = (existing.data[0]["run_number"] + 1) if existing.data else 1
+    run = insert_processing_run(client, {"invoice_id": invoice_id, "run_number": run_number, "status": "QUEUED", "triggered_by": trigger})
+    event = "INVOICE_SUBMITTED" if trigger == "MANUAL_UPLOAD" else ("INVOICE_RESUBMITTED" if trigger == "CLARIFICATION_RESUBMISSION" else "ANALYSIS_RETRIED")
+    # This first state change remains explicit so submit responses remain compatible
+    # with the existing Phase 1 pipeline; record the durable Phase 3 event beside it.
+    update_invoice_status(client, invoice_id, "QUEUED")
+    client.table("invoices").update({"current_stage": "ANALYSIS_QUEUED"}).eq("id", invoice_id).execute()
+    record_lifecycle_event(client, invoice_id, invoice.get("processing_status"), "QUEUED", "ANALYSIS_QUEUED",
+                           event, processing_run_id=run["id"])
+    background_tasks.add_task(_run_analysis, invoice_id, run["id"])
+    return {"run_id": run["id"], "run_number": run_number, "status": "QUEUED"}
 
 
 @router.post("/{invoice_id}/process")
 async def process_invoice(background_tasks: BackgroundTasks, invoice_id: str = Path(...)):
     """Start or retry invoice processing idempotently."""
     _validate_uuid(invoice_id)
-    client = _get_client()
-    
-    # Check invoice exists
-    invoice = get_invoice(client, invoice_id)
-    if not invoice:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Invoice not found.",
-        )
-    
-    # Check if there's already a running/queued run
-    runs_result = client.table("processing_runs").select("*").eq("invoice_id", invoice_id).eq("status", "QUEUED").execute()
-    if runs_result.data:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Processing already queued for this invoice.",
-        )
-    
-    runs_result = client.table("processing_runs").select("*").eq("invoice_id", invoice_id).eq("status", "RUNNING").execute()
-    if runs_result.data:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Processing already running for this invoice.",
-        )
-    
-    # Create new processing run
-    run_number = 1
-    existing_runs = client.table("processing_runs").select("run_number").eq("invoice_id", invoice_id).order("run_number", desc=True).limit(1).execute()
-    if existing_runs.data:
-        run_number = existing_runs.data[0]["run_number"] + 1
-    
-    run_payload = {
-        "invoice_id": invoice_id,
-        "run_number": run_number,
-        "status": "QUEUED",
-        "triggered_by": "MANUAL_RETRY" if run_number > 1 else "MANUAL_UPLOAD",
-    }
-    
-    try:
-        run = insert_processing_run(client, run_payload)
-    except RepositoryError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not create processing run: {exc}",
-        )
-    
-    # Queue first, then execute the bounded analysis workflow outside the response.
-    update_invoice_status(client, invoice_id, "QUEUED")
-    background_tasks.add_task(_run_analysis, invoice_id, run["id"])
-    
-    return {"run_id": run["id"], "run_number": run_number, "status": "QUEUED"}
+    return await _queue_analysis(background_tasks, invoice_id, "MANUAL_UPLOAD")
 
 
 @router.post("/{invoice_id}/analysis")
 async def retry_analysis(background_tasks: BackgroundTasks, invoice_id: str = Path(...)):
     """Explicit retry; creates a new processing run and preserves prior analysis history."""
     _validate_uuid(invoice_id)
-    return await process_invoice(background_tasks, invoice_id)
+    return await _queue_analysis(background_tasks, invoice_id, "MANUAL_RETRY")
+
+
+@router.post("/{invoice_id}/resubmit")
+async def resubmit_invoice(background_tasks: BackgroundTasks, invoice_id: str = Path(...)):
+    """Queue a corrected invoice after a reviewer requested clarification."""
+    _validate_uuid(invoice_id)
+    return await _queue_analysis(background_tasks, invoice_id, "CLARIFICATION_RESUBMISSION")
+
+
+@router.get("/{invoice_id}/lifecycle")
+async def invoice_lifecycle(invoice_id: str = Path(...)):
+    _validate_uuid(invoice_id)
+    return {"events": list_lifecycle_events(_get_client(), invoice_id)}
 
 
 @router.get("/{invoice_id}/analysis/latest")
@@ -928,3 +1040,37 @@ async def convert_draft(
         if result["status"] == "converted"
         else "Draft was already converted to this invoice.",
     }
+
+
+class CopilotRequest(BaseModel):
+    question: str
+    invoice_id: Optional[str] = None
+
+
+@router.post("/copilot")
+async def copilot(req: CopilotRequest, authorization: Optional[str] = Header(None)):
+    _verified_reviewer_id(authorization)
+    client = _get_client()
+    ctx: dict[str, Any] = {}
+    if req.invoice_id:
+        _validate_uuid(req.invoice_id)
+        inv = get_invoice(client, req.invoice_id)
+        if not inv:
+            raise HTTPException(status_code=404, detail="Invoice not found.")
+        ctx["invoice"] = inv
+        ctx["analysis"] = latest_invoice_analysis(client, req.invoice_id)
+        po, history = phase4_context(client, inv)
+        ctx["purchase_order"] = po
+        ctx["supplier_history"] = history
+        ctx["exceptions"] = list_exceptions(client, inv.get("client_id"), page_size=20)["exceptions"]
+    else:
+        cid, _ = resolve_demo_workspace(client)
+        ctx["invoices"] = list_invoices(client, cid, page_size=25)["invoices"]
+        ctx["approvals"] = list_approvals(client, cid, page_size=25)["approvals"]
+        ctx["exceptions"] = list_exceptions(client, cid, page_size=25)["exceptions"]
+    from app.invoices.copilot import answer
+    try:
+        text = await answer(req.question, ctx)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"answer": text}

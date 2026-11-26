@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Dict, Any
+import uuid
 from app.config import settings
 from supabase import create_client, Client
 
@@ -192,6 +193,45 @@ def update_invoice_status(client: Client, invoice_id: str, processing_status: st
     return data[0]
 
 
+def record_lifecycle_event(client: Client, invoice_id: str, from_status: Optional[str], to_status: str,
+                           stage: str, event_type: str, reason: Optional[str] = None,
+                           processing_run_id: Optional[str] = None, actor_id: Optional[str] = None,
+                           payload: Optional[dict] = None) -> dict:
+    """Persist an immutable lifecycle transition alongside the current invoice state."""
+    event = {"invoice_id": invoice_id, "from_status": from_status, "to_status": to_status,
+             "stage": stage, "event_type": event_type, "reason": reason,
+             "processing_run_id": processing_run_id, "actor_id": actor_id, "payload": payload or {}}
+    result = client.table("invoice_lifecycle_events").insert(event).execute()
+    if getattr(result, "error", None):
+        raise RepositoryError(f"Lifecycle event insert failed: {result.error}")
+    return (result.data or [{}])[0]
+
+
+def transition_invoice(client: Client, invoice_id: str, to_status: str, stage: str, event_type: str,
+                       reason: Optional[str] = None, processing_run_id: Optional[str] = None,
+                       actor_id: Optional[str] = None, payload: Optional[dict] = None,
+                       approval_status: Optional[str] = None) -> dict:
+    """Atomically update the business state and retain an explainable transition record."""
+    invoice = get_invoice(client, invoice_id)
+    if not invoice:
+        raise RepositoryError("Invoice not found")
+    update = {"processing_status": to_status, "current_stage": stage,
+              "updated_at": datetime.now(timezone.utc).isoformat()}
+    if approval_status is not None:
+        update["approval_status"] = approval_status
+    result = client.table("invoices").update(update).eq("id", invoice_id).execute()
+    if getattr(result, "error", None) or not (result.data or []):
+        raise RepositoryError("Invoice transition failed")
+    record_lifecycle_event(client, invoice_id, invoice.get("processing_status"), to_status, stage,
+                           event_type, reason, processing_run_id, actor_id, payload)
+    return result.data[0]
+
+
+def list_lifecycle_events(client: Client, invoice_id: str) -> list[dict]:
+    result = client.table("invoice_lifecycle_events").select("*").eq("invoice_id", invoice_id).order("created_at").execute()
+    return result.data or []
+
+
 # ==================== Processing Runs ====================
 
 def list_processing_runs(
@@ -292,6 +332,22 @@ def duplicate_invoice_exists(client: Client, invoice: dict) -> bool:
     rows = (client.table("invoices").select("id").eq("supplier_gstin", gstin)
         .eq("invoice_number", number).neq("id", invoice["id"]).execute().data or [])
     return bool(rows)
+
+
+def phase4_context(client: Client, invoice: dict) -> tuple[dict | None, list[dict]]:
+    """Load only persisted PO and supplier history used by Phase 4 matching."""
+    po = None
+    if invoice.get("po_number"):
+        rows = (client.table("purchase_orders").select("*").eq("po_number", invoice["po_number"])
+                .eq("client_entity_id", invoice["client_entity_id"]).limit(1).execute().data or [])
+        if rows:
+            po = rows[0]
+            po["items"] = (client.table("purchase_order_items").select("*").eq("purchase_order_id", po["id"]).order("line_number").execute().data or [])
+    history = []
+    if invoice.get("supplier_gstin"):
+        history = (client.table("invoices").select("id,total_amount,invoice_date,due_date").eq("supplier_gstin", invoice["supplier_gstin"])
+                   .neq("id", invoice["id"]).eq("client_id", invoice["client_id"]).limit(25).execute().data or [])
+    return po, history
 
 
 def next_analysis_attempt(client: Client, invoice_id: str) -> int:
@@ -421,7 +477,7 @@ def list_approvals(
     """List approval tasks with pagination and filtering."""
     # Join with invoices to filter by client_id
     query = client.table("approvals").select(
-        "*, invoices!inner(client_id, invoice_number, supplier_name, total_amount, currency)",
+        "*, invoices!inner(client_id, invoice_number, supplier_legal_name, total_amount, currency)",
         count="exact"
     ).eq("invoices.client_id", client_id)
     
@@ -464,7 +520,7 @@ def list_exceptions(
 ) -> Dict[str, Any]:
     """List exceptions with pagination and filtering."""
     query = client.table("exceptions").select(
-        "*, invoices!inner(client_id, invoice_number, supplier_name)",
+        "*, invoices!inner(client_id, invoice_number, supplier_legal_name)",
         count="exact"
     ).eq("invoices.client_id", client_id)
     
@@ -558,6 +614,51 @@ def resolve_exception(client: Client, exception_id: str, resolution_comment: str
     return data[0]
 
 
+def insert_approval(client: Client, invoice_id: str, processing_run_id: Optional[str] = None) -> dict:
+    """Create a pending human-review approval for an invoice. Idempotent per invoice."""
+    existing = client.table("approvals").select("id").eq("invoice_id", invoice_id).eq("status", "PENDING").execute().data or []
+    if existing:
+        return existing[0]
+    approval = {
+        "id": str(uuid.uuid4()),
+        "invoice_id": invoice_id,
+        "approver_user_id": None,
+        "approval_level": 1,
+        "status": "PENDING",
+        "decision_comment": None,
+        "assigned_at": datetime.now(timezone.utc).isoformat(),
+        "decided_at": None,
+    }
+    result = client.table("approvals").insert(approval).execute()
+    if getattr(result, "error", None) or not result.data:
+        raise RepositoryError("Approval insert failed")
+    return result.data[0]
+
+
+def insert_exception(client: Client, invoice_id: str, processing_run_id: Optional[str], exception_code: str, severity: str, description: str, owner_team: Optional[str] = None) -> dict:
+    """Create an actionable exception for an invoice. Idempotent while an active exception exists."""
+    existing = client.table("exceptions").select("id").eq("invoice_id", invoice_id).in_("status", ["OPEN", "AWAITING_RESPONSE", "IN_REVIEW", "ESCALATED"]).execute().data or []
+    if existing:
+        return existing[0]
+    exception = {
+        "id": str(uuid.uuid4()),
+        "invoice_id": invoice_id,
+        "processing_run_id": processing_run_id,
+        "exception_code": exception_code,
+        "severity": severity,
+        "owner_team": owner_team,
+        "status": "OPEN",
+        "description": description,
+        "resolution": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "resolved_at": None,
+    }
+    result = client.table("exceptions").insert(exception).execute()
+    if getattr(result, "error", None) or not result.data:
+        raise RepositoryError("Exception insert failed")
+    return result.data[0]
+
+
 # ==================== Approval Actions ====================
 
 def get_invoice_validation_status(client: Client, invoice_id: str) -> dict:
@@ -644,23 +745,17 @@ def action_approval(
     if not data:
         raise RepositoryError("Approval not found or update returned no data")
     
-    # Update invoice approval status
+    # Update invoice approval status and its lifecycle state.  A clarification
+    # request is intentionally non-terminal and can be resubmitted for a new run.
     invoice_approval_status_map = {
         "APPROVE": "APPROVED",
         "REJECT": "REJECTED",
         "RETURN_FOR_INFORMATION": "PENDING",  # Stays pending when returned for info
     }
-    client.table("invoices").update({
-        "approval_status": invoice_approval_status_map[action],
-        "updated_at": "now()",
-    }).eq("id", invoice_id).execute()
-    
-    # Also update processing status if approved
-    if action == "APPROVE":
-        client.table("invoices").update({
-            "processing_status": "APPROVED",
-            "updated_at": "now()",
-        }).eq("id", invoice_id).execute()
+    final_status = {"APPROVE": "APPROVED", "REJECT": "REJECTED", "RETURN_FOR_INFORMATION": "PENDING_APPROVAL"}[action]
+    stage = {"APPROVE": "FINALIZED", "REJECT": "FINALIZED", "RETURN_FOR_INFORMATION": "CLARIFICATION_REQUESTED"}[action]
+    transition_invoice(client, invoice_id, final_status, stage, f"HUMAN_{action}", comment,
+                       actor_id=actor_id, approval_status=invoice_approval_status_map[action])
     
     # Log to audit
     client.table("audit_logs").insert({
