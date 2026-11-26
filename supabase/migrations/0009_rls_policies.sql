@@ -1,164 +1,263 @@
--- -----------------------------------------------------------
--- WP7: RLS policies for single-workspace demo
--- RLS was enabled (rule of 0001:269-288) but zero policies exist.
--- These policies enforce workspace scope using the demo client ID
--- established in migration 0005 and seed_demo.py.  The backend uses
--- the service-role key (bypasses RLS), so adding these policies
--- does not affect any existing code path.  They protect direct
--- anon-key / browser access and document the intended access model.
--- -----------------------------------------------------------
+-- WP7: Supabase RLS and Storage security for the single-workspace demo.
+-- Corrected migration. Safe to re-run: every policy is dropped (by exact name)
+-- before it is created, and no unrelated policy is touched.
+--
+-- Access model (defense in depth; the backend always uses the service-role key
+-- which bypasses RLS, so these policies only govern direct anon/authenticated
+-- access and never replace backend authorization):
+--   * anon          -> no privileges, no policies  => fully denied.
+--   * authenticated -> SELECT only, workspace-scoped to the demo client.
+--                      No browser INSERT/UPDATE/DELETE on financial records.
+--   * service_role  -> unchanged (bypasses RLS); backend remains the writer.
+--
+-- Canonical workspace: seeded by migration 0005 and resolved by
+-- app.invoices.repository.resolve_demo_workspace() using display_name
+-- 'Invoice Intelligence Demo Workspace' + status 'ACTIVE'. The function below
+-- resolves it dynamically (security definer so it can read RLS-protected
+-- public.clients) rather than hardcoding a UUID.
 
--- Helper: demo client ID (the one seeded by migration 0005).
+-- ---------------------------------------------------------------------------
+-- Canonical demo workspace resolver
+-- ---------------------------------------------------------------------------
 create or replace function public.demo_client_id()
-returns uuid language sql stable
-as \$\$ select '11111111-1111-4111-8111-111111111111'::uuid \$\$;
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select id
+  from public.clients
+  where display_name = 'Invoice Intelligence Demo Workspace'
+    and status = 'ACTIVE'
+  order by created_at
+  limit 1
+$$;
 
--- Only create/adjust policies where a client_id or invoice_id
--- column exists and the table is not already RLS-forced by backend.
--- The rule "no USING (true) on invoice data" is honoured: policies
--- reference the demo client explicitly rather than a blanket true.
+-- ---------------------------------------------------------------------------
+-- Read tables: workspace-scoped SELECT for authenticated, none for anon.
+-- All writes stay with the backend service role.
+-- ---------------------------------------------------------------------------
 
--- invoices --------------------------------------------------------
+-- invoices ------------------------------------------------------------
 alter table public.invoices enable row level security;
+drop policy if exists "invoices_select_for_demo" on public.invoices;
 create policy "invoices_select_for_demo" on public.invoices
-    for select using ( client_id = public.demo_client_id() );
-create policy "invoices_insert_for_demo" on public.invoices
-    for insert with check ( client_id = public.demo_client_id() );
--- update/delete restricted to backend only via service-role; policy
--- here documents intent for any direct access.
-create policy "invoices_update_for_demo" on public.invoices
-    for update using ( client_id = public.demo_client_id() );
-create policy "invoices_delete_for_demo" on public.invoices
-    for delete using ( client_id = public.demo_client_id() );
+  for select to authenticated
+  using ( client_id = public.demo_client_id() );
+revoke all on public.invoices from anon;
+revoke insert, update, delete on public.invoices from authenticated;
+grant select on public.invoices to authenticated;
 
--- client_entities -------------------------------------------------
+-- client_entities -----------------------------------------------------
 alter table public.client_entities enable row level security;
+drop policy if exists "client_entities_select_for_demo" on public.client_entities;
 create policy "client_entities_select_for_demo" on public.client_entities
-    for select using ( client_id = public.demo_client_id() );
-create policy "client_entities_insert_for_demo" on public.client_entities
-    for insert with check ( client_id = public.demo_client_id() );
+  for select to authenticated
+  using ( client_id = public.demo_client_id() );
+revoke all on public.client_entities from anon;
+revoke insert, update, delete on public.client_entities from authenticated;
+grant select on public.client_entities to authenticated;
 
--- suppliers -------------------------------------------------------
+-- suppliers -----------------------------------------------------------
 alter table public.suppliers enable row level security;
+drop policy if exists "suppliers_select_for_demo" on public.suppliers;
 create policy "suppliers_select_for_demo" on public.suppliers
-    for select using ( client_id = public.demo_client_id() );
-create policy "suppliers_insert_for_demo" on public.suppliers
-    for insert with check ( client_id = public.demo_client_id() );
+  for select to authenticated
+  using ( client_id = public.demo_client_id() );
+revoke all on public.suppliers from anon;
+revoke insert, update, delete on public.suppliers from authenticated;
+grant select on public.suppliers to authenticated;
 
--- invoice_items -------------------------------------------------
+-- invoice_items -------------------------------------------------------
 alter table public.invoice_items enable row level security;
--- linked via invoice_id; enforce workspace through the parent invoice.
+drop policy if exists "invoice_items_select_for_demo" on public.invoice_items;
 create policy "invoice_items_select_for_demo" on public.invoice_items
-    for select using ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
-create policy "invoice_items_insert_for_demo" on public.invoice_items
-    for insert with check ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1 from public.invoices i
+    where i.id = invoice_items.invoice_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.invoice_items from anon;
+revoke insert, update, delete on public.invoice_items from authenticated;
+grant select on public.invoice_items to authenticated;
 
--- invoice_documents -----------------------------------------------
+-- invoice_documents ---------------------------------------------------
 alter table public.invoice_documents enable row level security;
+drop policy if exists "invoice_documents_select_for_demo" on public.invoice_documents;
 create policy "invoice_documents_select_for_demo" on public.invoice_documents
-    for select using ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
-create policy "invoice_documents_insert_for_demo" on public.invoice_documents
-    for insert with check ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1 from public.invoices i
+    where i.id = invoice_documents.invoice_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.invoice_documents from anon;
+revoke insert, update, delete on public.invoice_documents from authenticated;
+grant select on public.invoice_documents to authenticated;
 
--- processing_runs -------------------------------------------------
+-- processing_runs -----------------------------------------------------
 alter table public.processing_runs enable row level security;
+drop policy if exists "processing_runs_select_for_demo" on public.processing_runs;
 create policy "processing_runs_select_for_demo" on public.processing_runs
-    for select using ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
-create policy "processing_runs_insert_for_demo" on public.processing_runs
-    for insert with check ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1 from public.invoices i
+    where i.id = processing_runs.invoice_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.processing_runs from anon;
+revoke insert, update, delete on public.processing_runs from authenticated;
+grant select on public.processing_runs to authenticated;
 
--- validation_results ----------------------------------------------
+-- validation_results --------------------------------------------------
+-- Correlated to the current row's processing_run (fixes the prior
+-- uncorrelated subquery that exposed every result in the workspace).
 alter table public.validation_results enable row level security;
+drop policy if exists "validation_results_select_for_demo" on public.validation_results;
 create policy "validation_results_select_for_demo" on public.validation_results
-    for select using ( exists (
-        select 1 from public.processing_runs pr
-        join public.invoices i on i.id = pr.invoice_id
-        where i.client_id = public.demo_client_id()
-    ) );
-create policy "validation_results_insert_for_demo" on public.validation_results
-    for insert with check ( exists (
-        select 1 from public.processing_runs pr
-        join public.invoices i on i.id = pr.invoice_id
-        where i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1
+    from public.processing_runs pr
+    join public.invoices i on i.id = pr.invoice_id
+    where pr.id = validation_results.processing_run_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.validation_results from anon;
+revoke insert, update, delete on public.validation_results from authenticated;
+grant select on public.validation_results to authenticated;
 
--- exceptions ----------------------------------------------------
+-- exceptions ----------------------------------------------------------
 alter table public.exceptions enable row level security;
+drop policy if exists "exceptions_select_for_demo" on public.exceptions;
 create policy "exceptions_select_for_demo" on public.exceptions
-    for select using ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
-create policy "exceptions_insert_for_demo" on public.exceptions
-    for insert with check ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1 from public.invoices i
+    where i.id = exceptions.invoice_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.exceptions from anon;
+revoke insert, update, delete on public.exceptions from authenticated;
+grant select on public.exceptions to authenticated;
 
--- approvals -------------------------------------------------------
+-- approvals -----------------------------------------------------------
 alter table public.approvals enable row level security;
+drop policy if exists "approvals_select_for_demo" on public.approvals;
 create policy "approvals_select_for_demo" on public.approvals
-    for select using ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
-create policy "approvals_insert_for_demo" on public.approvals
-    for insert with check ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1 from public.invoices i
+    where i.id = approvals.invoice_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.approvals from anon;
+revoke insert, update, delete on public.approvals from authenticated;
+grant select on public.approvals to authenticated;
 
--- audit_logs ------------------------------------------------------
+-- audit_logs ----------------------------------------------------------
 alter table public.audit_logs enable row level security;
+drop policy if exists "audit_logs_select_for_demo" on public.audit_logs;
 create policy "audit_logs_select_for_demo" on public.audit_logs
-    for select using ( client_id = public.demo_client_id() );
+  for select to authenticated
+  using ( client_id = public.demo_client_id() );
+revoke all on public.audit_logs from anon;
+revoke insert, update, delete on public.audit_logs from authenticated;
+grant select on public.audit_logs to authenticated;
 
--- invoice_ai_analyses -------------------------------------------
+-- invoice_ai_analyses -------------------------------------------------
 alter table public.invoice_ai_analyses enable row level security;
+drop policy if exists "invoice_ai_analyses_select_for_demo" on public.invoice_ai_analyses;
 create policy "invoice_ai_analyses_select_for_demo" on public.invoice_ai_analyses
-    for select using ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
-create policy "invoice_ai_analyses_insert_for_demo" on public.invoice_ai_analyses
-    for insert with check ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1 from public.invoices i
+    where i.id = invoice_ai_analyses.invoice_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.invoice_ai_analyses from anon;
+revoke insert, update, delete on public.invoice_ai_analyses from authenticated;
+grant select on public.invoice_ai_analyses to authenticated;
 
--- invoice_lifecycle_events --------------------------------------
+-- invoice_lifecycle_events -------------------------------------------
 alter table public.invoice_lifecycle_events enable row level security;
+drop policy if exists "invoice_lifecycle_events_select_for_demo" on public.invoice_lifecycle_events;
 create policy "invoice_lifecycle_events_select_for_demo" on public.invoice_lifecycle_events
-    for select using ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
-create policy "invoice_lifecycle_events_insert_for_demo" on public.invoice_lifecycle_events
-    for insert with check ( exists (
-        select 1 from public.invoices i
-        where i.id = invoice_id and i.client_id = public.demo_client_id()
-    ) );
+  for select to authenticated
+  using ( exists (
+    select 1 from public.invoices i
+    where i.id = invoice_lifecycle_events.invoice_id
+      and i.client_id = public.demo_client_id()
+  ) );
+revoke all on public.invoice_lifecycle_events from anon;
+revoke insert, update, delete on public.invoice_lifecycle_events from authenticated;
+grant select on public.invoice_lifecycle_events to authenticated;
 
--- purchase_orders ------------------------------------------------
+-- purchase_orders -----------------------------------------------------
 alter table public.purchase_orders enable row level security;
+drop policy if exists "purchase_orders_select_for_demo" on public.purchase_orders;
 create policy "purchase_orders_select_for_demo" on public.purchase_orders
-    for select using ( client_entity_id in (
-     
+  for select to authenticated
+  using ( exists (
+    select 1 from public.client_entities ce
+    where ce.id = purchase_orders.client_entity_id
+      and ce.client_id = public.demo_client_id()
+  ) );
+revoke all on public.purchase_orders from anon;
+revoke insert, update, delete on public.purchase_orders from authenticated;
+grant select on public.purchase_orders to authenticated;
+
+-- purchase_order_items ------------------------------------------------
+alter table public.purchase_order_items enable row level security;
+drop policy if exists "purchase_order_items_select_for_demo" on public.purchase_order_items;
+create policy "purchase_order_items_select_for_demo" on public.purchase_order_items
+  for select to authenticated
+  using ( exists (
+    select 1
+    from public.purchase_orders po
+    join public.client_entities ce on ce.id = po.client_entity_id
+    where po.id = purchase_order_items.purchase_order_id
+      and ce.client_id = public.demo_client_id()
+  ) );
+revoke all on public.purchase_order_items from anon;
+revoke insert, update, delete on public.purchase_order_items from authenticated;
+grant select on public.purchase_order_items to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Service-role-only tables: RLS enabled, NO browser policy, no browser grants.
+-- These hold intake drafts (raw invoice text), bank details, GRN/SES,
+-- contracts, budgets and the client registry. Only the backend service role
+-- (RLS bypass) may touch them.
+-- ---------------------------------------------------------------------------
+revoke all on public.clients from anon, authenticated;
+revoke all on public.supplier_bank_accounts from anon, authenticated;
+revoke all on public.goods_receipts from anon, authenticated;
+revoke all on public.goods_receipt_items from anon, authenticated;
+revoke all on public.service_entries from anon, authenticated;
+revoke all on public.contracts from anon, authenticated;
+revoke all on public.budgets from anon, authenticated;
+revoke all on public.invoice_intake_drafts from anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Private 'invoices' Storage bucket: read-only for authenticated, denied to
+-- anon. Uploads/downloads are performed by the backend service role. No
+-- browser INSERT/UPDATE/DELETE policies are created. If the SQL editor lacks
+-- privileges on storage.objects, create the equivalent policy in the Storage
+-- dashboard (bucket 'invoices', SELECT, authenticated).
+-- ---------------------------------------------------------------------------
+drop policy if exists "invoices_bucket_authenticated_select" on storage.objects;
+create policy "invoices_bucket_authenticated_select" on storage.objects
+  for select to authenticated
+  using ( bucket_id = 'invoices' );
+
+-- ---------------------------------------------------------------------------
+-- Manual verification (run each separately; expected: 1 row / 0 rows)
+-- ---------------------------------------------------------------------------
+-- select public.demo_client_id();                    -- one demo uuid
+-- select tablename, policyname, cmd, roles
+--   from pg_policies where schemaname = 'public' order by tablename, policyname;
+-- select has_table_privilege('anon', 'public.invoices', 'select');        -- false
+-- select has_table_privilege('authenticated', 'public.invoices', 'select');-- true
+-- select has_table_privilege('authenticated', 'public.invoices', 'delete');-- false
