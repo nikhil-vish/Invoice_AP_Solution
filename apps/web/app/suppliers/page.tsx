@@ -155,7 +155,7 @@ export default function SuppliersPage() {
                   <td>{sup.vendor_code || "—"}</td>
                   <td>
                     <span className={`statusBadge ${getStatusColor(sup.status)}`}>
-                      {sup.status}
+                      {sup.status === "PENDING" ? "NEW" : sup.status}
                     </span>
                   </td>
                   <td>{sup.aliases?.length ? sup.aliases.join(", ") : "—"}</td>

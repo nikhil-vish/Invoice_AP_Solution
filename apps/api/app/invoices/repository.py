@@ -108,8 +108,30 @@ def list_invoices(
             for row in drafts
             if row.get("converted_invoice_id")
         }
+    analyses_by_invoice: dict[str, dict] = {}
+    if invoice_ids:
+        analyses = (
+            client.table("invoice_ai_analyses")
+            .select("invoice_id,status,recommendation,risk_level,findings,created_at")
+            .in_("invoice_id", invoice_ids)
+            .order("created_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+        for analysis in analyses:
+            analysis_invoice_id = analysis.get("invoice_id")
+            if analysis_invoice_id and analysis_invoice_id not in analyses_by_invoice:
+                analyses_by_invoice[analysis_invoice_id] = analysis
     for invoice in invoices:
         invoice["draft_id"] = drafts_by_invoice.get(invoice["id"])
+        analysis = analyses_by_invoice.get(invoice["id"])
+        invoice["ai_summary"] = None if not analysis or analysis.get("status") != "COMPLETED" else {
+            "risk_level": analysis.get("risk_level"),
+            "recommendation": analysis.get("recommendation"),
+            "finding_count": len(analysis.get("findings") or []),
+            "created_at": analysis.get("created_at"),
+        }
     return {
         "invoices": invoices,
         "total": result.count or 0,
@@ -378,13 +400,23 @@ def invoice_analysis_history(client: Client, invoice_id: str) -> list[dict]:
 def ai_dashboard_metrics(client: Client, client_id: str, date_from: str | None = None, date_to: str | None = None,
                          risk_level: str | None = None, invoice_status: str | None = None) -> dict:
     """Aggregate persisted invoice, analysis, run, and approval records in Python."""
-    invoice_query = client.table("invoices").select("id,processing_status,created_at").eq("client_id", client_id)
+    invoice_query = client.table("invoices").select("id,processing_status,created_at,total_amount,taxable_value,cgst_amount,sgst_amount,igst_amount").eq("client_id", client_id)
     if date_from: invoice_query = invoice_query.gte("created_at", date_from)
     if date_to: invoice_query = invoice_query.lte("created_at", date_to)
     if invoice_status: invoice_query = invoice_query.eq("processing_status", invoice_status)
     invoices = invoice_query.execute().data or []
     ids = [row["id"] for row in invoices]
-    empty = {"total_invoices_analysed": 0, "recommendations": {}, "human_decisions": {}, "comparison": {}, "override_rate": None, "risk_distribution": {}, "common_findings": [], "average_submission_to_decision_hours": None}
+    statuses: dict[str, int] = {}
+    for invoice in invoices:
+        state = invoice.get("processing_status") or "UNKNOWN"
+        statuses[state] = statuses.get(state, 0) + 1
+    def total(field: str) -> str | None:
+        values = [Decimal(str(invoice[field])) for invoice in invoices if invoice.get(field) is not None]
+        return str(sum(values)) if values else None
+    operational = {"total_invoices": len(invoices), "statuses": statuses}
+    financial = {"total_invoice_value": total("total_amount"), "total_taxable_value": total("taxable_value"),
+                 "cgst": total("cgst_amount"), "sgst": total("sgst_amount"), "igst": total("igst_amount")}
+    empty = {"total_invoices_analysed": 0, "recommendations": {}, "human_decisions": {}, "comparison": {}, "override_rate": None, "risk_distribution": {}, "common_findings": [], "average_submission_to_decision_hours": None, "operational": operational, "financial": financial}
     if not ids: return empty
     analyses = client.table("invoice_ai_analyses").select("*").in_("invoice_id", ids).eq("status", "COMPLETED").order("created_at", desc=True).execute().data or []
     latest = {}
@@ -424,7 +456,8 @@ def ai_dashboard_metrics(client: Client, client_id: str, date_from: str | None =
     return {"total_invoices_analysed": len(latest), "recommendations": recommendations, "human_decisions": human,
             "comparison": comparison, "override_rate": round(overrides / paired * 100, 2) if paired else None,
             "risk_distribution": risks, "common_findings": [{"category": key, "count": value} for key, value in sorted(findings.items(), key=lambda item: item[1], reverse=True)[:10]],
-            "average_submission_to_decision_hours": round(sum(durations) / len(durations), 2) if durations else None}
+            "average_submission_to_decision_hours": round(sum(durations) / len(durations), 2) if durations else None,
+            "operational": operational, "financial": financial}
 
 
 # ==================== Suppliers ====================
@@ -636,8 +669,11 @@ def insert_approval(client: Client, invoice_id: str, processing_run_id: Optional
 
 
 def insert_exception(client: Client, invoice_id: str, processing_run_id: Optional[str], exception_code: str, severity: str, description: str, owner_team: Optional[str] = None) -> dict:
-    """Create an actionable exception for an invoice. Idempotent while an active exception exists."""
-    existing = client.table("exceptions").select("id").eq("invoice_id", invoice_id).in_("status", ["OPEN", "AWAITING_RESPONSE", "IN_REVIEW", "ESCALATED"]).execute().data or []
+    """Create an actionable exception once per active invoice/rule pair."""
+    existing = (client.table("exceptions").select("id").eq("invoice_id", invoice_id)
+                .eq("exception_code", exception_code)
+                .in_("status", ["OPEN", "AWAITING_RESPONSE", "IN_REVIEW", "ESCALATED"])
+                .execute().data or [])
     if existing:
         return existing[0]
     exception = {
@@ -657,6 +693,37 @@ def insert_exception(client: Client, invoice_id: str, processing_run_id: Optiona
     if getattr(result, "error", None) or not result.data:
         raise RepositoryError("Exception insert failed")
     return result.data[0]
+
+
+def ensure_supplier_link(client: Client, invoice_id: str, actor_id: str) -> dict | None:
+    """Link an approved invoice to its GSTIN-matched supplier, creating a pending new supplier once."""
+    invoice = get_invoice(client, invoice_id)
+    if not invoice:
+        raise RepositoryError("Invoice not found")
+    if invoice.get("supplier_id"):
+        return {"id": invoice["supplier_id"], "created": False}
+    gstin = (invoice.get("supplier_gstin") or "").strip().upper()
+    name = (invoice.get("supplier_legal_name") or "").strip()
+    if not gstin or not name:
+        return None
+    existing = (client.table("suppliers").select("id").eq("client_id", invoice["client_id"])
+                .eq("gstin", gstin).limit(1).execute().data or [])
+    created = not bool(existing)
+    supplier = existing[0] if existing else (client.table("suppliers").insert({
+        "client_id": invoice["client_id"], "legal_name": name, "gstin": gstin,
+        "status": "PENDING", "aliases": [],
+    }).execute().data or [None])[0]
+    if not supplier:
+        raise RepositoryError("Supplier registration failed")
+    result = client.table("invoices").update({"supplier_id": supplier["id"], "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", invoice_id).execute()
+    if getattr(result, "error", None) or not (result.data or []):
+        raise RepositoryError("Could not link supplier to invoice")
+    client.table("audit_logs").insert({
+        "invoice_id": invoice_id, "actor_type": "USER", "actor_id": actor_id,
+        "action": "SUPPLIER_CREATED" if created else "SUPPLIER_MATCHED",
+        "after_state": {"supplier_id": supplier["id"], "gstin": gstin},
+    }).execute()
+    return {"id": supplier["id"], "created": created}
 
 
 # ==================== Approval Actions ====================
@@ -723,6 +790,9 @@ def action_approval(
             if validation_status["has_hard_stop_exceptions"]:
                 raise RepositoryError(f"Cannot approve: {validation_status['hard_stop_count']} unresolved CRITICAL exception(s) exist")
             raise RepositoryError("Cannot approve: validation not passed")
+        # Do this before the approval state changes: a registration failure must
+        # leave the approval actionable instead of reporting a partial success.
+        ensure_supplier_link(client, invoice_id, actor_id)
     
     # Map action to approval status
     status_map = {

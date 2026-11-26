@@ -1801,8 +1801,8 @@ def test_demo_workspace_resolution_uses_seeded_active_records():
     assert repository.resolve_demo_workspace(mock_client) == ("client-1", "entity-1")
 
 
-def test_submit_for_processing_persists_queued_status():
-    """The Phase 1 submit action changes the primary record, not just the UI."""
+def test_submit_for_processing_persists_submitted_status():
+    """Submission is persisted before automatic background processing begins."""
     mock_client = _make_mock_client()
     queued_runs = _chain_result([])
     running_runs = _chain_result([])
@@ -1818,5 +1818,5 @@ def test_submit_for_processing_persists_queued_status():
         response = client.post("/api/v1/invoices/550e8400-e29b-41d4-a716-446655440001/process")
 
     assert response.status_code == 200, response.text
-    assert response.json()["status"] == "QUEUED"
-    update_status.assert_called_once_with(mock_client, "550e8400-e29b-41d4-a716-446655440001", "QUEUED")
+    assert response.json()["status"] == "SUBMITTED"
+    update_status.assert_called_once_with(mock_client, "550e8400-e29b-41d4-a716-446655440001", "SUBMITTED")

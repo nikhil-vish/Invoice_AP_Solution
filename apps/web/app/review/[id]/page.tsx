@@ -77,6 +77,7 @@ export default function ReviewPage() {
   const [editedLines, setEditedLines] = useState<LineItem[]>([]);
   const [saved, setSaved] = useState(false);
   const [queueing, setQueueing] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
 
   const fetchData = useCallback(async () => {
@@ -159,7 +160,7 @@ export default function ReviewPage() {
     setSaved(false);
   };
 
-  const handleSaveDraft = async () => {
+  const saveDraft = async () => {
     if (!data || !draftId) return;
     const payload = {
       draft_id: data.draft_id,
@@ -179,13 +180,17 @@ export default function ReviewPage() {
       setSaved(true);
       await fetchData();
       window.setTimeout(fetchAnalysis, 500);
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed.");
+      return false;
     }
   };
 
+  const handleSaveDraft = async () => { await saveDraft(); };
+
   const handleSubmit = async () => {
-    if (!data?.invoice_id) return;
+    if (!data?.invoice_id || !(await saveDraft())) return;
     setQueueing(true);
     setError(null);
     try {
@@ -194,6 +199,7 @@ export default function ReviewPage() {
         const body = await res.json().catch(() => null);
         throw new Error(body?.detail || "Could not queue invoice.");
       }
+      setSubmitted(true);
       await fetchData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not queue invoice.");
@@ -383,11 +389,12 @@ export default function ReviewPage() {
         <button className="btnGreen" onClick={handleSaveDraft}>
           {saved ? "Saved" : "Save draft"}
         </button>
-        {saved && data.invoice_id && (
+        {data.invoice_id && !submitted && (
           <button className="btnOutline" onClick={handleSubmit} disabled={queueing} style={{ marginLeft: 8 }}>
-            {queueing ? "Queuing…" : "Submit for processing"}
+            {queueing ? "Submitting…" : "Submit invoice"}
           </button>
         )}
+        {submitted && <span className="muted">Submitted — processing starts automatically.</span>}
         <a href="/invoices" className="btnOutline" style={{ marginLeft: 8 }}>View All Invoices</a>
 
         <span className="muted">Extraction method: PyMuPDF (digital text only, no OCR)</span>

@@ -377,6 +377,8 @@ async def approval_action_endpoint(
     _validate_uuid(approval_id)
     reviewer_id = _verified_reviewer_id(authorization)
     client = _get_client()
+    if not request:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A request body is required.")
     try:
         result = action_approval(
             client,
@@ -800,19 +802,16 @@ async def _run_analysis(invoice_id: str, run_id: str) -> None:
 
     # WP4: runtime actionable workflow records — idempotent, never block processing
     try:
-        if not ai_completed and hard_failure:
-            # Deterministic hard failure → actionable exception
-            failed_checks = [c for c in checks if c.get("status") == "FAILED"]
-            code = failed_checks[0].get("rule_code", "DETERMINISTIC_FAILURE")
-            insert_exception(
-                client,
-                invoice_id,
-                run_id,
-                code,
-                "HIGH",
-                f"Deterministic check failed: {code}",
-                owner_team="tax-team",
-            )
+        if hard_failure:
+            # Every deterministic failure is independently actionable.  The
+            # repository deduplicates retries by invoice and rule code.
+            for failed_check in (c for c in checks if c.get("status") == "FAILED"):
+                code = failed_check.get("rule_code", "DETERMINISTIC_FAILURE")
+                insert_exception(
+                    client, invoice_id, run_id, code, "HIGH",
+                    failed_check.get("message") or f"Deterministic check failed: {code}",
+                    owner_team="tax-team",
+                )
         elif ai_completed and recommendation == "REQUEST_CLARIFICATION":
             insert_exception(
                 client,
@@ -852,14 +851,14 @@ async def _queue_analysis(background_tasks: BackgroundTasks, invoice_id: str, tr
     run_number = (existing.data[0]["run_number"] + 1) if existing.data else 1
     run = insert_processing_run(client, {"invoice_id": invoice_id, "run_number": run_number, "status": "QUEUED", "triggered_by": trigger})
     event = "INVOICE_SUBMITTED" if trigger == "MANUAL_UPLOAD" else ("INVOICE_RESUBMITTED" if trigger == "CLARIFICATION_RESUBMISSION" else "ANALYSIS_RETRIED")
-    # This first state change remains explicit so submit responses remain compatible
-    # with the existing Phase 1 pipeline; record the durable Phase 3 event beside it.
-    update_invoice_status(client, invoice_id, "QUEUED")
-    client.table("invoices").update({"current_stage": "ANALYSIS_QUEUED"}).eq("id", invoice_id).execute()
-    record_lifecycle_event(client, invoice_id, invoice.get("processing_status"), "QUEUED", "ANALYSIS_QUEUED",
+    # Submission is a durable user-visible state; background work then moves it
+    # to PROCESSING.  There is no second manual submit step.
+    update_invoice_status(client, invoice_id, "SUBMITTED")
+    client.table("invoices").update({"current_stage": "SUBMITTED"}).eq("id", invoice_id).execute()
+    record_lifecycle_event(client, invoice_id, invoice.get("processing_status"), "SUBMITTED", "SUBMITTED",
                            event, processing_run_id=run["id"])
     background_tasks.add_task(_run_analysis, invoice_id, run["id"])
-    return {"run_id": run["id"], "run_number": run_number, "status": "QUEUED"}
+    return {"run_id": run["id"], "run_number": run_number, "status": "SUBMITTED"}
 
 
 @router.post("/{invoice_id}/process")
@@ -924,10 +923,11 @@ async def get_draft(draft_id: str = Path(...)):
         )
     draft = data[0]
     summary = draft.get("extracted_data") or {}
+    invoice = get_invoice(client, draft["converted_invoice_id"]) if draft.get("converted_invoice_id") else None
     return {
         "draft_id": draft["id"],
         "invoice_id": draft.get("converted_invoice_id"),
-        "status": draft["processing_status"],
+        "status": (invoice or draft)["processing_status"],
         "filename": draft["original_filename"],
         "file_size_bytes": draft["file_size_bytes"],
         "sha256": draft["sha256"],

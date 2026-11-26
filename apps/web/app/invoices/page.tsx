@@ -19,6 +19,7 @@ interface InvoiceSummary {
   current_stage: string | null;
   approval_status: string;
   created_at: string;
+  ai_summary: { risk_level: string | null; recommendation: string | null; finding_count: number; created_at: string } | null;
 }
 
 interface InvoicesResponse {
@@ -72,6 +73,7 @@ export default function InvoicesPage() {
       case "PENDING": return "statusPending";
       case "REJECTED": return "statusRejected";
       case "ON_HOLD": return "statusOnHold";
+      case "SUBMITTED": return "statusRunning";
       default: return "";
     }
   };
@@ -151,7 +153,7 @@ export default function InvoicesPage() {
               <th>GSTIN</th>
               <th>Amount</th>
               <th>Processing</th>
-              <th>Current stage</th>
+              <th>AI intelligence</th>
               <th>Received</th>
             </tr>
           </thead>
@@ -175,7 +177,7 @@ export default function InvoicesPage() {
                       {inv.processing_status}
                     </span>
                   </td>
-                  <td>{inv.current_stage || "—"}</td>
+                  <td>{inv.ai_summary ? <><span className={`statusBadge risk${inv.ai_summary.risk_level || "Unknown"}`}>{inv.ai_summary.risk_level || "Unknown"}</span> {inv.ai_summary.recommendation || "—"} · {inv.ai_summary.finding_count} finding{inv.ai_summary.finding_count === 1 ? "" : "s"}</> : <span className="muted">Not analysed</span>}</td>
                   <td>{inv.created_at ? new Date(inv.created_at).toLocaleDateString() : "—"}</td>
                 </tr>
               ))
