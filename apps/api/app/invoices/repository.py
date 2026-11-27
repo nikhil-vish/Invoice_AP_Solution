@@ -490,8 +490,22 @@ def list_suppliers(
     query = query.range(start, end)
     
     result = query.execute()
+    suppliers = result.data or []
+    
+    # Attach PO numbers per supplier
+    po_map: Dict[str, List[str]] = {}
+    try:
+        po_result = client.table("purchase_orders").select("supplier_id,po_number").execute().data or []
+        for po in po_result:
+            po_map.setdefault(po.get("supplier_id"), []).append(po.get("po_number"))
+    except Exception:
+        pass
+    
+    for s in suppliers:
+        s["po_numbers"] = po_map.get(s.get("id"), [])
+    
     return {
-        "suppliers": result.data or [],
+        "suppliers": suppliers,
         "total": result.count or 0,
         "page": page,
         "page_size": page_size,
@@ -775,6 +789,7 @@ def action_approval(
     action: str,
     comment: Optional[str],
     actor_id: str,
+    override: bool = False,
 ) -> dict:
     """Process an approval action (APPROVE, REJECT, RETURN_FOR_INFORMATION)."""
     valid_actions = ["APPROVE", "REJECT", "RETURN_FOR_INFORMATION"]
@@ -800,7 +815,8 @@ def action_approval(
         if not validation_status["ready_for_approval"]:
             if validation_status["has_hard_stop_exceptions"]:
                 raise RepositoryError(f"Cannot approve: {validation_status['hard_stop_count']} unresolved CRITICAL exception(s) exist")
-            raise RepositoryError("Cannot approve: validation not passed")
+            if not override:
+                raise RepositoryError("Cannot approve: validation not passed")
         # Do this before the approval state changes: a registration failure must
         # leave the approval actionable instead of reporting a partial success.
         ensure_supplier_link(client, invoice_id, actor_id)

@@ -1,5 +1,4 @@
 "use client";
-
 import { Shell } from "@/components/Shell";
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
@@ -42,17 +41,11 @@ export default function InvoicesPage() {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({
-        page: page.toString(),
-        page_size: "20",
-      });
+      const params = new URLSearchParams({ page: page.toString(), page_size: "20" });
       if (search) params.append("search", search);
       if (statusFilter) params.append("status", statusFilter);
-
       const res = await fetch(`${API_BASE_URL}/api/v1/invoices?${params.toString()}`);
-      if (!res.ok) {
-        throw new Error("Failed to fetch invoices");
-      }
+      if (!res.ok) throw new Error("Failed to fetch invoices");
       const data: InvoicesResponse = await res.json();
       setInvoices(data.invoices);
       setTotal(data.total);
@@ -63,9 +56,7 @@ export default function InvoicesPage() {
     }
   }, [page, search, statusFilter]);
 
-  useEffect(() => {
-    fetchInvoices();
-  }, [fetchInvoices]);
+  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -73,138 +64,81 @@ export default function InvoicesPage() {
       case "PENDING": return "statusPending";
       case "REJECTED": return "statusRejected";
       case "ON_HOLD": return "statusOnHold";
-      case "SUBMITTED": return "statusRunning";
+      case "SUBMITTED": return "statusSubmitted";
       default: return "";
     }
   };
 
   const formatCurrency = (amount: number, currency: string) => {
-    return new Intl.NumberFormat("en-IN", {
-      style: "currency",
-      currency: currency || "INR",
-      minimumFractionDigits: 2,
-    }).format(amount);
+    return new Intl.NumberFormat("en-IN", { style: "currency", currency: currency || "INR", minimumFractionDigits: 2 }).format(amount);
   };
 
   if (loading && invoices.length === 0) {
     return (
       <Shell>
-        <header className="topbar">
-          <div>
-            <div className="eyebrow">ACCOUNTS PAYABLE / INVOICES</div>
-            <h1>All Invoices</h1>
-          </div>
-        </header>
-        <div className="emptyState">
-          <div className="emptyIcon">↻</div>
-          <strong>Loading invoices…</strong>
-        </div>
+        <header className="topbar"><div><div className="eyebrow">ACCOUNTS PAYABLE / INVOICES</div><h1>All Invoices</h1></div><a href="/upload" className="btnPrimary" style={{textDecoration:"none"}}>▤ Upload Invoice</a></header>
+        <div className="emptyState"><div className="emptyIcon">↻</div><strong>Loading invoices…</strong></div>
       </Shell>
     );
   }
 
   return (
     <Shell>
-      <header className="topbar">
-        <div>
-          <div className="eyebrow">ACCOUNTS PAYABLE / INVOICES</div>
-          <h1>All Invoices</h1>
-        </div>
-        <a href="/upload" className="btnGreen" style={{ textDecoration: "none" }}>
-          ▤ Upload Invoice
-        </a>
-      </header>
-
+      <header className="topbar"><div><div className="eyebrow">ACCOUNTS PAYABLE / INVOICES</div><h1>All Invoices</h1></div><a href="/upload" className="btnPrimary" style={{textDecoration:"none"}}>▤ Upload Invoice</a></header>
       <div className="filterBar">
-        <input
-          type="text"
-          placeholder="Search invoice number, supplier, PO…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="searchInput"
-        />
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="filterSelect"
-        >
+        <input type="text" placeholder="Search invoice number, supplier, PO…" value={search} onChange={(e)=>setSearch(e.target.value)} className="searchInput"/>
+        <select value={statusFilter} onChange={(e)=>setStatusFilter(e.target.value)} className="filterSelect">
           <option value="">All statuses</option>
           <option value="DRAFT">Draft</option>
           <option value="QUEUED">Queued</option>
+          <option value="SUBMITTED">Submitted</option>
+          <option value="PROCESSING">Processing</option>
+          <option value="APPROVED">Approved</option>
+          <option value="REJECTED">Rejected</option>
         </select>
       </div>
-
       {error && (
-        <div className="errorCard">
-          <div className="errorIcon">!</div>
-          <strong>Failed to load invoices</strong>
-          <p>{error}</p>
-          <button className="btnGreen" onClick={fetchInvoices}>Retry</button>
-        </div>
+        <div className="errorCard"><div className="errorIcon">!</div><strong>Failed to load invoices</strong><p>{error}</p><button className="btnPrimary" onClick={fetchInvoices}>Retry</button></div>
       )}
-
       <div className="tableWrap">
         <table className="dataTable">
           <thead>
             <tr>
-              <th>Invoice #</th>
-              <th>Date</th>
-              <th>Supplier</th>
-              <th>GSTIN</th>
-              <th>Amount</th>
-              <th>Processing</th>
-              <th>AI intelligence</th>
-              <th>Received</th>
+              <th style={{textAlign:"left"}}>Invoice #</th>
+              <th style={{textAlign:"left"}}>Date</th>
+              <th style={{textAlign:"left"}}>Supplier</th>
+              <th style={{textAlign:"left"}}>GSTIN</th>
+              <th style={{textAlign:"right"}}>Amount</th>
+              <th style={{textAlign:"left"}}>Processing</th>
+              <th style={{textAlign:"left"}}>AI intelligence</th>
+              <th style={{textAlign:"left"}}>Received</th>
             </tr>
           </thead>
           <tbody>
             {invoices.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="emptyRow">
-                  {error ? "Failed to load invoices" : "No invoices found. Upload an invoice to get started."}
-                </td>
-              </tr>
+              <tr><td colSpan={8} className="emptyRow">{error ? "Failed to load invoices" : "No invoices found. Upload an invoice to get started."}</td></tr>
             ) : (
               invoices.map((inv) => (
-                <tr key={inv.id} style={{ cursor: inv.draft_id ? "pointer" : "default" }} onClick={() => inv.draft_id && (window.location.href = `/review/${inv.draft_id}`)}>
-                  <td><strong>{inv.invoice_number || "—"}</strong></td>
-                  <td>{inv.invoice_date || "—"}</td>
+                <tr key={inv.id} style={{cursor:inv.draft_id ? "pointer" : "default"}} onClick={()=>inv.draft_id && (window.location.href=`/review/${inv.draft_id}`)}>
+                  <td><strong style={{color:"var(--ink)"}}>{inv.invoice_number || "—"}</strong></td>
+                  <td style={{color:"var(--muted)"}}>{inv.invoice_date || "—"}</td>
                   <td>{inv.supplier_legal_name || "—"}</td>
-                  <td>{inv.supplier_gstin || "—"}</td>
-                  <td>{formatCurrency(inv.total_amount || 0, inv.currency || "INR")}</td>
-                  <td>
-                    <span className={`statusBadge ${getStatusColor(inv.processing_status)}`}>
-                      {inv.processing_status}
-                    </span>
-                  </td>
-                  <td>{inv.ai_summary ? <><span className={`statusBadge risk${inv.ai_summary.risk_level || "Unknown"}`}>{inv.ai_summary.risk_level || "Unknown"}</span> {inv.ai_summary.recommendation || "—"} · {inv.ai_summary.finding_count} finding{inv.ai_summary.finding_count === 1 ? "" : "s"}</> : <span className="muted">Not analysed</span>}</td>
-                  <td>{inv.created_at ? new Date(inv.created_at).toLocaleDateString() : "—"}</td>
+                  <td style={{fontSize:12,color:"var(--muted)"}}>{inv.supplier_gstin || "—"}</td>
+                  <td style={{textAlign:"right",fontWeight:600}}>{formatCurrency(inv.total_amount || 0, inv.currency || "INR")}</td>
+                  <td><span className={`statusBadge ${getStatusColor(inv.processing_status)}`}>{inv.processing_status}</span></td>
+                  <td>{inv.ai_summary ? (<><span className={`statusBadge risk${(inv.ai_summary.risk_level||"Unknown").toUpperCase()}`}>{inv.ai_summary.risk_level || "Unknown"}</span>&nbsp;{inv.ai_summary.recommendation || "—"} · {inv.ai_summary.finding_count} finding{inv.ai_summary.finding_count === 1 ? "" : "s"}</>):<span className="muted">Not analysed</span>}</td>
+                  <td style={{color:"var(--muted)"}}>{inv.created_at ? new Date(inv.created_at).toLocaleDateString() : "—"}</td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </div>
-
       {total > 20 && (
         <div className="pagination">
-          <button
-            className="btnOutline"
-            disabled={page === 1}
-            onClick={() => setPage(p => p - 1)}
-          >
-            ← Previous
-          </button>
-          <span className="pageInfo">
-            Page {page} of {Math.ceil(total / 20)} ({total} total)
-          </span>
-          <button
-            className="btnOutline"
-            disabled={page * 20 >= total}
-            onClick={() => setPage(p => p + 1)}
-          >
-            Next →
-          </button>
+          <button className="btnOutline" disabled={page===1} onClick={()=>setPage(p=>p-1)}>← Previous</button>
+          <span className="pageInfo">Page {page} of {Math.ceil(total / 20)} ({total} total)</span>
+          <button className="btnOutline" disabled={page * 20 >= total} onClick={()=>setPage(p=>p+1)}>Next →</button>
         </div>
       )}
     </Shell>

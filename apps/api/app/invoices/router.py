@@ -99,6 +99,7 @@ class ExceptionResolveRequest(BaseModel):
 class ApprovalActionRequest(BaseModel):
     action: str  # APPROVE, REJECT, RETURN_FOR_INFORMATION
     comment: Optional[str] = None
+    override: bool = False
 
 
 class ReviewFieldValue(BaseModel):
@@ -386,6 +387,7 @@ async def approval_action_endpoint(
             action=request.action.upper(),
             comment=request.comment,
             actor_id=reviewer_id,
+            override=request.override,
         )
     except RepositoryError as exc:
         raise HTTPException(
