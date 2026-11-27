@@ -46,6 +46,11 @@ export default function ApprovalsPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
+  const clearToken = () => {
+    window.localStorage.removeItem("supabase_access_token");
+    setToken(null);
+  };
+
   useEffect(() => setToken(window.localStorage.getItem("supabase_access_token")), []);
 
   const signIn = async () => {
@@ -63,6 +68,7 @@ export default function ApprovalsPage() {
       const params = new URLSearchParams({ page: page.toString(), page_size: "20" });
       if (statusFilter) params.append("status", statusFilter);
       const res = await fetch(`${API_BASE_URL}/api/v1/invoices/approvals?${params.toString()}`);
+      if (res.status === 401) { clearToken(); setError("Session expired. Please sign in again."); return; }
       if (!res.ok) throw new Error("Failed to fetch approvals");
       const data: ApprovalsResponse = await res.json();
       setApprovals(data.approvals);
@@ -115,6 +121,7 @@ export default function ApprovalsPage() {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ action, comment: comment || undefined }),
       });
+      if (res.status === 401) { clearToken(); setToast({ type: "error", message: "Session expired. Please sign in again." }); return; }
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: "Action failed" }));
         throw new Error(err.detail || "Action failed");

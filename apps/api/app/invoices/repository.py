@@ -627,7 +627,6 @@ def resolve_exception(client: Client, exception_id: str, resolution_comment: str
         "status": "RESOLVED",
         "resolution": {"comment": resolution_comment, "resolved_by": actor_id},
         "resolved_at": "now()",
-        "updated_at": "now()",
     }).eq("id", exception_id).execute()
     if getattr(result, "error", None):
         raise RepositoryError(f"Resolve failed: {result.error}")
@@ -643,7 +642,19 @@ def resolve_exception(client: Client, exception_id: str, resolution_comment: str
         "action": "EXCEPTION_RESOLVED",
         "after_state": {"resolution": {"comment": resolution_comment, "resolved_by": actor_id}, "status": "RESOLVED"},
     }).execute()
-    
+
+    # If all exceptions for this invoice are now resolved/closed, create a pending approval
+    # and transition the invoice to PENDING_APPROVAL so it appears in the approvals queue.
+    remaining = client.table("exceptions").select("id,status").eq("invoice_id", data[0].get("invoice_id")).in_("status", ["OPEN", "AWAITING_RESPONSE", "IN_REVIEW", "ESCALATED"]).execute().data or []
+    if not remaining:
+        invoice_id = data[0].get("invoice_id")
+        existing_approval = client.table("approvals").select("id").eq("invoice_id", invoice_id).eq("status", "PENDING").execute().data or []
+        if not existing_approval:
+            insert_approval(client, invoice_id, processing_run_id=None)
+        transition_invoice(client, invoice_id, "PENDING_APPROVAL", "HUMAN_APPROVAL", "EXCEPTIONS_RESOLVED",
+                           reason="All exceptions resolved; routed for human approval", actor_id=actor_id,
+                           approval_status="PENDING")
+
     return data[0]
 
 
@@ -948,6 +959,11 @@ def create_invoice_for_draft(client: Client, draft: dict) -> dict:
         "extraction_method": draft.get("extraction_method"),
     })
     update_draft_conversion(client, draft["id"], invoice_id, "CONVERTED")
+    # Auto-link supplier by GSTIN so supplier section is populated on upload
+    try:
+        ensure_supplier_link(client, invoice_id, "system")
+    except Exception:
+        pass
     return invoice
 
 

@@ -43,10 +43,15 @@ export default function ExceptionsPage() {
   const [token, setToken] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [selected, setSelected] = useState<ExceptionItem | null>(null);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState<{ id: string; action: string; value: string } | null>(null);
-  const [selected, setSelected] = useState<ExceptionItem | null>(null);
+  const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const clearToken = () => {
+    window.localStorage.removeItem("supabase_access_token");
+    setToken(null);
+  };
 
   useEffect(() => {
     setToken(window.localStorage.getItem("supabase_access_token"));
@@ -75,6 +80,7 @@ export default function ExceptionsPage() {
       if (severityFilter) params.append("severity", severityFilter);
       if (statusFilter) params.append("status", statusFilter);
       const res = await fetch(`${API_BASE_URL}/api/v1/invoices/exceptions?${params.toString()}`);
+      if (res.status === 401) { clearToken(); setError("Session expired. Please sign in again."); return; }
       if (!res.ok) throw new Error("Failed to fetch exceptions");
       const data: ExceptionsResponse = await res.json();
       setExceptions(data.exceptions);
@@ -85,6 +91,10 @@ export default function ExceptionsPage() {
       setLoading(false);
     }
   }, [page, severityFilter, statusFilter]);
+
+  useEffect(() => {
+    fetchExceptions();
+  }, [fetchExceptions]);
 
   const headersForToken = () => ({ "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) });
 
@@ -134,6 +144,7 @@ export default function ExceptionsPage() {
           headers: { ...headersForToken(), "Content-Type": "application/json" },
           body: JSON.stringify({ resolution_comment: value, actor_id: "current-user" }),
         });
+        if (res.status === 401) { clearToken(); setToast({ type: "error", message: "Session expired. Please sign in again." }); return; }
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: "Resolve failed" }));
           throw new Error(err.detail || "Resolve failed");
@@ -147,6 +158,7 @@ export default function ExceptionsPage() {
           headers: { ...headersForToken(), "Content-Type": "application/json" },
           body: JSON.stringify({ owner_team: value, actor_id: "current-user" }),
         });
+        if (res.status === 401) { clearToken(); setToast({ type: "error", message: "Session expired. Please sign in again." }); return; }
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: "Assign failed" }));
           throw new Error(err.detail || "Assign failed");
@@ -309,7 +321,9 @@ export default function ExceptionsPage() {
                 </td>
               </tr>
             ) : (
-              exceptions.map((exc) => (
+              exceptions.map((exc) => {
+                if (!exc) return null;
+                return (
                 <tr
                   key={exc.id}
                   style={{ cursor: "pointer" }}
@@ -355,7 +369,8 @@ export default function ExceptionsPage() {
                     </div>
                   </td>
                 </tr>
-              ))
+              )
+            })
             )}
           </tbody>
         </table>
