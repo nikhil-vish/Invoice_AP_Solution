@@ -20,6 +20,11 @@ app.add_middleware(
 app.include_router(invoices_router)
 
 
+@app.get("/", tags=["system"])
+def root():
+    return {"status": "ok", "service": "invoice-intelligence-api", "version": "0.1.0", "docs": "/docs", "health": "/health"}
+
+
 @app.get("/health", tags=["system"])
 def health():
     return {"status": "ok", "service": "invoice-intelligence-api", "version": "0.1.0"}
